@@ -9,24 +9,34 @@
 <body>
   <canvas id="canvas"></canvas>
   <div id="ui">
-    <div id="hud">
+    <div id="level-select" class="panel">
+      <h1>Logic Gates</h1>
+      <p class="subtitle">Build circuits. Match the goal.</p>
+      <div id="level-grid"></div>
+    </div>
+
+    <div id="hud" hidden>
       <div id="level-info" class="panel">
         <h1 id="level-title">Level 1</h1>
         <p id="level-desc"></p>
       </div>
-      <div id="goal-box" class="panel">
-        <div class="label">Goal</div>
-        <div class="pattern" id="goal-pattern"></div>
-        <div class="case" id="goal-case"></div>
+      <div class="hud-right">
+        <div id="goal-box" class="panel">
+          <div class="label">Goal</div>
+          <div class="pattern" id="goal-pattern"></div>
+          <div class="case" id="goal-case"></div>
+        </div>
+        <button id="btn-levels" class="panel btn-levels" type="button">Levels</button>
       </div>
     </div>
-    <div id="hint" class="panel">Drag components · Connect ports on release · E toggle lever / disconnect</div>
+    <div id="hint" class="panel" hidden>Drag components · Connect ports on release · E toggle lever / disconnect</div>
     <div id="win-overlay">
       <div id="win-card" class="panel">
         <h2 id="win-title">Level Complete!</h2>
         <p id="win-msg">Nice work.</p>
         <button id="btn-next">Next Level</button>
         <button id="btn-replay" class="secondary">Replay</button>
+        <button id="btn-win-levels" class="secondary">Level Select</button>
       </div>
     </div>
   </div>
