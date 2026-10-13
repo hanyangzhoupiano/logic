@@ -184,7 +184,8 @@ function wireCrossesAnyObject(wire, objects) {
     const bx = wire.outputPort.x;
     const by = wire.outputPort.y;
     for (const obj of objects) {
-        if (segmentHitsRect(ax, ay, bx, by, obj.x, obj.y, obj.w, obj.h)) {
+        // padding 0 so the wire centerline cannot sit inside the body
+        if (segmentHitsRect(ax, ay, bx, by, obj.x, obj.y, obj.w, obj.h, 0)) {
             return true;
         }
     }
@@ -231,8 +232,8 @@ class Port {
     }
 
     get color() {
-        if (this.powered && this.isConnected) return '#3b82f6';
-        if (this.isConnected) return '#f5f5f5';
+        if (this.powered) return '#3b82f6';
+        if (this.isConnected) return '#111';
         return this.type === 'input' ? '#22c55e' : '#ef4444';
     }
 
@@ -245,9 +246,12 @@ class Port {
         ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
         ctx.fillStyle = this.color;
         ctx.fill();
-        ctx.strokeStyle = this.isConnected && !this.powered ? '#555' : '#000';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
+        // powered = solid blue, no outline
+        if (!this.powered) {
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+        }
     }
 
     connect(other, canvas) {
@@ -361,8 +365,6 @@ class Obj {
 
     draw(ctx) {
         drawBody(ctx, this.x, this.y, this.w, this.h);
-        if (this.inputPort) this.inputPort.draw(ctx);
-        if (this.outputPort) this.outputPort.draw(ctx);
     }
 
     contains(px, py) {
@@ -435,9 +437,6 @@ class Gate2 extends Obj {
     draw(ctx) {
         drawBody(ctx, this.x, this.y, this.w, this.h);
         drawLabel(ctx, this.x, this.y, this.w, this.h, this.label);
-        if (this.inputA) this.inputA.draw(ctx);
-        if (this.inputB) this.inputB.draw(ctx);
-        if (this.outputPort) this.outputPort.draw(ctx);
     }
 }
 
@@ -478,8 +477,6 @@ class NOT extends Obj {
     draw(ctx) {
         drawBody(ctx, this.x, this.y, this.w, this.h);
         drawLabel(ctx, this.x, this.y, this.w, this.h, 'NOT');
-        if (this.inputPort) this.inputPort.draw(ctx);
-        if (this.outputPort) this.outputPort.draw(ctx);
     }
 }
 
@@ -551,8 +548,6 @@ class Lever extends Obj {
         ctx.fill();
         ctx.strokeStyle = '#222';
         ctx.stroke();
-
-        if (this.outputPort) this.outputPort.draw(ctx);
     }
 }
 
@@ -590,7 +585,6 @@ class Battery extends Obj {
         ctx.moveTo(cx + 4, cy - 5);
         ctx.lineTo(cx + 4, cy + 5);
         ctx.stroke();
-        if (this.outputPort) this.outputPort.draw(ctx);
     }
 }
 
@@ -648,7 +642,6 @@ class Button extends Obj {
         ctx.strokeStyle = '#000';
         ctx.lineWidth = 2;
         ctx.stroke();
-        if (this.outputPort) this.outputPort.draw(ctx);
     }
 }
 
@@ -731,8 +724,6 @@ class Lamp extends Obj {
         ctx.moveTo(cx + 8, by + br - 2);
         ctx.lineTo(cx + 8, neckY);
         ctx.stroke();
-
-        if (this.inputPort) this.inputPort.draw(ctx);
     }
 }
 
@@ -833,8 +824,6 @@ class Wire {
         ctx.lineWidth = WIRE_WIDTH;
         ctx.lineCap = 'round';
         ctx.stroke();
-        this.inputPort.draw(ctx);
-        this.outputPort.draw(ctx);
     }
 
     getPorts() {
@@ -1412,7 +1401,7 @@ function snapJointOnRelease(portA, portB, objs) {
     moveJoint(portA, portB, nx, ny, objs);
 }
 
-function translateWire(wire, dx, dy) {
+function applyWireTranslation(wire, dx, dy) {
     const r = PORT_RADIUS;
     let nx1 = wire.inputPort.x + dx;
     let ny1 = wire.inputPort.y + dy;
@@ -1433,6 +1422,29 @@ function translateWire(wire, dx, dy) {
     wire.inputPort.y = ny1 + adjY;
     wire.outputPort.x = nx2 + adjX;
     wire.outputPort.y = ny2 + adjY;
+}
+
+/** Translate a free wire without phasing through objects (stepped to avoid tunneling). */
+function translateWire(wire, dx, dy, objs) {
+    const distMove = Math.hypot(dx, dy);
+    if (distMove < 1e-6) return;
+    const steps = Math.max(1, Math.ceil(distMove / 3));
+    const sdx = dx / steps;
+    const sdy = dy / steps;
+    for (let i = 0; i < steps; i++) {
+        const ox1 = wire.inputPort.x;
+        const oy1 = wire.inputPort.y;
+        const ox2 = wire.outputPort.x;
+        const oy2 = wire.outputPort.y;
+        applyWireTranslation(wire, sdx, sdy);
+        if (wireCrossesAnyObject(wire, objs)) {
+            wire.inputPort.x = ox1;
+            wire.inputPort.y = oy1;
+            wire.outputPort.x = ox2;
+            wire.outputPort.y = oy2;
+            break;
+        }
+    }
 }
 
 // ---------- events ----------
@@ -1552,7 +1564,7 @@ window.addEventListener('mousemove', (e) => {
     } else if (drag.kind === 'wire-translate') {
         const dx = pos.x - drag.lastMouseX;
         const dy = pos.y - drag.lastMouseY;
-        translateWire(drag.wire, dx, dy);
+        translateWire(drag.wire, dx, dy, objects);
         drag.lastMouseX = pos.x;
         drag.lastMouseY = pos.y;
     } else if (drag.kind === 'wire-group') {
@@ -1606,7 +1618,15 @@ window.addEventListener('mouseup', () => {
             );
         }
     } else if (drag.kind === 'wire-translate') {
-        // ends may land on ports — handled by connectOverlappingPorts below
+        const w = drag.wire;
+        w.snapPortOnRelease(w.inputPort, objects, canvas);
+        w.snapPortOnRelease(w.outputPort, objects, canvas);
+        if (wireCrossesAnyObject(w, objects)) {
+            const p1 = w.constrainPortPosition(w.inputPort, w.inputPort.x, w.inputPort.y, objects, canvas);
+            w.inputPort.x = p1.x; w.inputPort.y = p1.y;
+            const p2 = w.constrainPortPosition(w.outputPort, w.outputPort.x, w.outputPort.y, objects, canvas);
+            w.outputPort.x = p2.x; w.outputPort.y = p2.y;
+        }
     }
 
     syncAllPorts();
@@ -1718,6 +1738,7 @@ function loop(now) {
 
     for (const w of wires) w.draw(ctx);
     for (const o of objects) o.draw(ctx);
+    for (const p of allPorts()) p.draw(ctx);
 
     if (!drag) {
         if (hoveredLever) {
