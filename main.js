@@ -1,13 +1,846 @@
-import {
-    clamp, snapGrid, dist, circlesOverlap, rectsOverlap,
-    resolveOverlap, anyWiresCross, PORT_RADIUS, MAX_WIRE_LENGTH,
-    raycastObjects, snapAngle
-} from './utils.js';
-import {
-    Obj, AND, OR, XOR, NAND, NOR, XNOR, NOT,
-    Lever, Battery, Button, Lamp
-} from './components.js';
-import { Wire } from './wire.js';
+const GRID = 10;
+const MAX_WIRE_LENGTH = 300;
+const ANGLE_SNAP = 5;
+const PORT_RADIUS = 8;
+const WIRE_WIDTH = 5;
+const BODY_FILL = 'rgb(65, 65, 80)';
+const BUTTON_MIN_MS = 300;
+
+function clamp(value, size, max) {
+    return Math.max(0, Math.min(value, max - size));
+}
+
+function snapGrid(value, size, max) {
+    const maxPos = max - size;
+    const gridSnap = Math.round(value / GRID) * GRID;
+    if (Math.abs(value - maxPos) <= Math.abs(value - gridSnap)) {
+        return maxPos;
+    }
+    return clamp(gridSnap, size, max);
+}
+
+function snapAngle(deg) {
+    return Math.round(deg / ANGLE_SNAP) * ANGLE_SNAP;
+}
+
+function dist(x1, y1, x2, y2) {
+    return Math.hypot(x2 - x1, y2 - y1);
+}
+
+function circlesOverlap(x1, y1, r1, x2, y2, r2) {
+    return dist(x1, y1, x2, y2) <= r1 + r2;
+}
+
+function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
+    return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+}
+
+function segmentHitsRect(x1, y1, x2, y2, rx, ry, rw, rh, padding = 3) {
+    const left = rx + padding;
+    const right = rx + rw - padding;
+    const top = ry + padding;
+    const bottom = ry + rh - padding;
+    if (right <= left || bottom <= top) return false;
+
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    let t0 = 0;
+    let t1 = 1;
+
+    const clip = (p, q) => {
+        if (Math.abs(p) < 1e-10) return q >= 0;
+        const r = q / p;
+        if (p < 0) {
+            if (r > t1) return false;
+            if (r > t0) t0 = r;
+        } else {
+            if (r < t0) return false;
+            if (r < t1) t1 = r;
+        }
+        return true;
+    };
+
+    if (!clip(-dx, x1 - left)) return false;
+    if (!clip(dx, right - x1)) return false;
+    if (!clip(-dy, y1 - top)) return false;
+    if (!clip(dy, bottom - y1)) return false;
+    return t0 < t1 && t1 > 0.01 && t0 < 0.99;
+}
+
+function pointToSegment(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq < 1e-10) {
+        return { dist: dist(px, py, x1, y1), x: x1, y: y1, t: 0 };
+    }
+    let t = ((px - x1) * dx + (py - y1) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    const cx = x1 + t * dx;
+    const cy = y1 + t * dy;
+    return { dist: dist(px, py, cx, cy), x: cx, y: cy, t };
+}
+
+function raycastRect(x1, y1, x2, y2, rx, ry, rw, rh) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    let tMin = 0;
+    let tMax = 1;
+
+    const edges = [
+        { p: -dx, q: x1 - rx },
+        { p: dx, q: rx + rw - x1 },
+        { p: -dy, q: y1 - ry },
+        { p: dy, q: ry + rh - y1 }
+    ];
+
+    for (const { p, q } of edges) {
+        if (Math.abs(p) < 1e-10) {
+            if (q < 0) return null;
+            continue;
+        }
+        const t = q / p;
+        if (p < 0) {
+            if (t > tMax) return null;
+            if (t > tMin) tMin = t;
+        } else {
+            if (t < tMin) return null;
+            if (t < tMax) tMax = t;
+        }
+    }
+
+    if (x1 > rx && x1 < rx + rw && y1 > ry && y1 < ry + rh) {
+        return 0;
+    }
+
+    if (tMin > 0 && tMin <= 1) return tMin;
+    return null;
+}
+
+function raycastObjects(x1, y1, x2, y2, objects, attachedObj = null, inset = 1.5) {
+    let sx = x1;
+    let sy = y1;
+
+    if (attachedObj) {
+        const cx = attachedObj.x + attachedObj.w / 2;
+        const cy = attachedObj.y + attachedObj.h / 2;
+        let odx = sx - cx;
+        let ody = sy - cy;
+        const od = Math.hypot(odx, ody) || 1;
+        sx += (odx / od) * 3;
+        sy += (ody / od) * 3;
+    }
+
+    let bestT = 1;
+    let hit = false;
+
+    for (const obj of objects) {
+        const t = raycastRect(sx, sy, x2, y2, obj.x, obj.y, obj.w, obj.h);
+        if (t !== null && t < bestT) {
+            bestT = t;
+            hit = true;
+        }
+    }
+
+    if (!hit || bestT >= 1) {
+        return { x: x2, y: y2 };
+    }
+
+    const segLen = Math.max(1, dist(sx, sy, x2, y2));
+    const t = Math.max(0, bestT - inset / segLen);
+    return {
+        x: sx + (x2 - sx) * t,
+        y: sy + (y2 - sy) * t
+    };
+}
+
+function resolveOverlap(moving, other) {
+    const overlapX = Math.min(moving.x + moving.w, other.x + other.w) - Math.max(moving.x, other.x);
+    const overlapY = Math.min(moving.y + moving.h, other.y + other.h) - Math.max(moving.y, other.y);
+    if (overlapX <= 0 || overlapY <= 0) return;
+
+    if (overlapX < overlapY) {
+        const movingCenter = moving.x + moving.w / 2;
+        const otherCenter = other.x + other.w / 2;
+        if (movingCenter < otherCenter) {
+            moving.x = other.x - moving.w;
+        } else {
+            moving.x = other.x + other.w;
+        }
+    } else {
+        const movingCenter = moving.y + moving.h / 2;
+        const otherCenter = other.y + other.h / 2;
+        if (movingCenter < otherCenter) {
+            moving.y = other.y - moving.h;
+        } else {
+            moving.y = other.y + other.h;
+        }
+    }
+}
+
+function wireCrossesAnyObject(wire, objects) {
+    const ax = wire.inputPort.x;
+    const ay = wire.inputPort.y;
+    const bx = wire.outputPort.x;
+    const by = wire.outputPort.y;
+    for (const obj of objects) {
+        if (segmentHitsRect(ax, ay, bx, by, obj.x, obj.y, obj.w, obj.h)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function anyWiresCross(wireList, objects) {
+    for (const w of wireList) {
+        if (wireCrossesAnyObject(w, objects)) return true;
+    }
+    return false;
+}
+
+function drawBody(ctx, x, y, w, h) {
+    ctx.fillStyle = BODY_FILL;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+}
+
+function drawLabel(ctx, x, y, w, h, text) {
+    ctx.fillStyle = '#ddd';
+    ctx.font = 'bold 12px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, x + w / 2, y + h / 2);
+    ctx.textAlign = 'left';
+}
+
+class Port {
+    constructor(x, y, type, owner) {
+        this.x = x;
+        this.y = y;
+        this.type = type; // 'input' | 'output'
+        this.owner = owner;
+        this.connectedTo = null;
+        this.radius = PORT_RADIUS;
+        this.powered = false;
+    }
+
+    get isConnected() {
+        return this.connectedTo !== null;
+    }
+
+    get color() {
+        if (this.powered && this.isConnected) return '#3b82f6';
+        if (this.isConnected) return '#f5f5f5';
+        return this.type === 'input' ? '#22c55e' : '#ef4444';
+    }
+
+    contains(px, py) {
+        return dist(px, py, this.x, this.y) <= this.radius + 2;
+    }
+
+    draw(ctx) {
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+        ctx.fillStyle = this.color;
+        ctx.fill();
+        ctx.strokeStyle = this.isConnected && !this.powered ? '#555' : '#000';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+    }
+
+    connect(other, canvas) {
+        if (this.connectedTo || other.connectedTo) return false;
+        if (this.type === other.type) return false;
+
+        const thisIsWire = !!this.owner.isWire;
+        const otherIsWire = !!other.owner.isWire;
+
+        this.connectedTo = other;
+        other.connectedTo = this;
+
+        if (thisIsWire && !otherIsWire) {
+            this.x = other.x;
+            this.y = other.y;
+        } else if (otherIsWire && !thisIsWire) {
+            other.x = this.x;
+            other.y = this.y;
+        } else if (thisIsWire && otherIsWire) {
+            const mx = (this.x + other.x) / 2;
+            const my = (this.y + other.y) / 2;
+            this.x = mx;
+            this.y = my;
+            other.x = mx;
+            other.y = my;
+        } else {
+            // object ↔ object: only connect if already touching; nudge to exact align
+            const d0 = dist(this.x, this.y, other.x, other.y);
+            if (d0 > PORT_RADIUS * 2 + 8) {
+                this.connectedTo = null;
+                other.connectedTo = null;
+                return false;
+            }
+            const obj = this.owner;
+            obj.x += other.x - this.x;
+            obj.y += other.y - this.y;
+            obj.x = clamp(obj.x, obj.w, canvas.width);
+            obj.y = clamp(obj.y, obj.h, canvas.height);
+            obj.updatePorts();
+            if (dist(this.x, this.y, other.x, other.y) > 0.5) {
+                obj.x += other.x - this.x;
+                obj.y += other.y - this.y;
+                obj.x = clamp(obj.x, obj.w, canvas.width);
+                obj.y = clamp(obj.y, obj.h, canvas.height);
+                obj.updatePorts();
+            }
+            if (dist(this.x, this.y, other.x, other.y) > PORT_RADIUS * 2) {
+                this.connectedTo = null;
+                other.connectedTo = null;
+                return false;
+            }
+        }
+        return true;
+    }
+
+    disconnect() {
+        if (!this.connectedTo) return;
+        const other = this.connectedTo;
+        this.connectedTo = null;
+        other.connectedTo = null;
+    }
+}
+
+// ---------- Obj (passthrough block) ----------
+
+class Obj {
+    constructor(x, y, w = 80, h = 60) {
+        this.x = x;
+        this.y = y;
+        this.w = w;
+        this.h = h;
+        this.inputPort = new Port(0, 0, 'input', this);
+        this.outputPort = new Port(0, 0, 'output', this);
+        this.updatePorts();
+    }
+
+    updatePorts() {
+        if (this.inputPort) {
+            this.inputPort.x = this.x + this.w / 2;
+            this.inputPort.y = this.y;
+            if (this.inputPort.connectedTo && this.inputPort.connectedTo.owner.isWire) {
+                this.inputPort.connectedTo.x = this.inputPort.x;
+                this.inputPort.connectedTo.y = this.inputPort.y;
+            }
+        }
+        if (this.outputPort) {
+            this.outputPort.x = this.x + this.w / 2;
+            this.outputPort.y = this.y + this.h;
+            if (this.outputPort.connectedTo && this.outputPort.connectedTo.owner.isWire) {
+                this.outputPort.connectedTo.x = this.outputPort.x;
+                this.outputPort.connectedTo.y = this.outputPort.y;
+            }
+        }
+    }
+
+    /** true if this input port has a live signal (unconnected = false) */
+    inputSignal(port) {
+        if (!port) return false;
+        return !!port.powered;
+    }
+
+    /**
+     * Evaluate this component's outputs from current input powered flags.
+     * Always assigns the correct boolean (true or false) so inverting gates work.
+     */
+    evaluate() {
+        if (this.inputPort && this.outputPort) {
+            this.outputPort.powered = this.inputSignal(this.inputPort);
+        }
+    }
+
+    draw(ctx) {
+        drawBody(ctx, this.x, this.y, this.w, this.h);
+        if (this.inputPort) this.inputPort.draw(ctx);
+        if (this.outputPort) this.outputPort.draw(ctx);
+    }
+
+    contains(px, py) {
+        return px >= this.x && px <= this.x + this.w &&
+               py >= this.y && py <= this.y + this.h;
+    }
+
+    getPorts() {
+        const ports = [];
+        if (this.inputPort) ports.push(this.inputPort);
+        if (this.inputA) ports.push(this.inputA);
+        if (this.inputB) ports.push(this.inputB);
+        if (this.outputPort) ports.push(this.outputPort);
+        return ports;
+    }
+
+    get isSource() {
+        return false;
+    }
+}
+
+// ---------- Dual-input gate base ----------
+
+class Gate2 extends Obj {
+    constructor(x, y, label, op) {
+        super(x, y, 90, 56);
+        this.inputPort = null; // use inputA / inputB
+        this.inputA = new Port(0, 0, 'input', this);
+        this.inputB = new Port(0, 0, 'input', this);
+        this.label = label;
+        this.op = op; // (a, b) => boolean
+        this.updatePorts();
+    }
+
+    updatePorts() {
+        if (this.inputA) {
+            this.inputA.x = this.x + this.w * 0.3;
+            this.inputA.y = this.y;
+            if (this.inputA.connectedTo && this.inputA.connectedTo.owner.isWire) {
+                this.inputA.connectedTo.x = this.inputA.x;
+                this.inputA.connectedTo.y = this.inputA.y;
+            }
+        }
+        if (this.inputB) {
+            this.inputB.x = this.x + this.w * 0.7;
+            this.inputB.y = this.y;
+            if (this.inputB.connectedTo && this.inputB.connectedTo.owner.isWire) {
+                this.inputB.connectedTo.x = this.inputB.x;
+                this.inputB.connectedTo.y = this.inputB.y;
+            }
+        }
+        if (this.outputPort) {
+            this.outputPort.x = this.x + this.w / 2;
+            this.outputPort.y = this.y + this.h;
+            if (this.outputPort.connectedTo && this.outputPort.connectedTo.owner.isWire) {
+                this.outputPort.connectedTo.x = this.outputPort.x;
+                this.outputPort.connectedTo.y = this.outputPort.y;
+            }
+        }
+    }
+
+    evaluate() {
+        const a = this.inputSignal(this.inputA);
+        const b = this.inputSignal(this.inputB);
+        if (this.outputPort) {
+            this.outputPort.powered = this.op(a, b);
+        }
+    }
+
+    draw(ctx) {
+        drawBody(ctx, this.x, this.y, this.w, this.h);
+        drawLabel(ctx, this.x, this.y, this.w, this.h, this.label);
+        if (this.inputA) this.inputA.draw(ctx);
+        if (this.inputB) this.inputB.draw(ctx);
+        if (this.outputPort) this.outputPort.draw(ctx);
+    }
+}
+
+class AND extends Gate2 {
+    constructor(x, y) { super(x, y, 'AND', (a, b) => a && b); }
+}
+class OR extends Gate2 {
+    constructor(x, y) { super(x, y, 'OR', (a, b) => a || b); }
+}
+class XOR extends Gate2 {
+    constructor(x, y) { super(x, y, 'XOR', (a, b) => a !== b); }
+}
+class NAND extends Gate2 {
+    constructor(x, y) { super(x, y, 'NAND', (a, b) => !(a && b)); }
+}
+class NOR extends Gate2 {
+    constructor(x, y) { super(x, y, 'NOR', (a, b) => !(a || b)); }
+}
+class XNOR extends Gate2 {
+    constructor(x, y) { super(x, y, 'XNOR', (a, b) => a === b); }
+}
+
+// ---------- NOT ----------
+
+class NOT extends Obj {
+    constructor(x, y) {
+        super(x, y, 70, 50);
+        this.updatePorts();
+    }
+
+    evaluate() {
+        const a = this.inputSignal(this.inputPort);
+        if (this.outputPort) {
+            this.outputPort.powered = !a;
+        }
+    }
+
+    draw(ctx) {
+        drawBody(ctx, this.x, this.y, this.w, this.h);
+        drawLabel(ctx, this.x, this.y, this.w, this.h, 'NOT');
+        if (this.inputPort) this.inputPort.draw(ctx);
+        if (this.outputPort) this.outputPort.draw(ctx);
+    }
+}
+
+// ---------- Lever ----------
+
+class Lever extends Obj {
+    constructor(x, y, w = 70, h = 50) {
+        super(x, y, w, h);
+        this.inputPort = null;
+        this.on = false;
+        this.switchT = 0;
+        this.updatePorts();
+    }
+
+    get isSource() { return true; }
+
+    toggle() {
+        this.on = !this.on;
+    }
+
+    updateAnimation(dt) {
+        const target = this.on ? 1 : 0;
+        const speed = 10;
+        if (this.switchT < target) {
+            this.switchT = Math.min(target, this.switchT + speed * dt);
+        } else if (this.switchT > target) {
+            this.switchT = Math.max(target, this.switchT - speed * dt);
+        }
+    }
+
+    evaluate() {
+        if (this.outputPort) {
+            this.outputPort.powered = !!this.on;
+        }
+    }
+
+    draw(ctx) {
+        drawBody(ctx, this.x, this.y, this.w, this.h);
+
+        const trackW = this.w * 0.55;
+        const trackH = this.h * 0.36;
+        const trackX = this.x + (this.w - trackW) / 2;
+        const trackY = this.y + (this.h - trackH) / 2 - 2;
+
+        const t = this.switchT;
+        const r = Math.round(60 + t * (34 - 60));
+        const g = Math.round(60 + t * (197 - 60));
+        const b = Math.round(60 + t * (94 - 60));
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.beginPath();
+        const radius = trackH / 2;
+        ctx.moveTo(trackX + radius, trackY);
+        ctx.arcTo(trackX + trackW, trackY, trackX + trackW, trackY + trackH, radius);
+        ctx.arcTo(trackX + trackW, trackY + trackH, trackX, trackY + trackH, radius);
+        ctx.arcTo(trackX, trackY + trackH, trackX, trackY, radius);
+        ctx.arcTo(trackX, trackY, trackX + trackW, trackY, radius);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        const knobR = trackH / 2 - 2;
+        const knobX = trackX + radius + t * (trackW - 2 * radius);
+        const knobY = trackY + trackH / 2;
+        ctx.beginPath();
+        ctx.arc(knobX, knobY, knobR, 0, Math.PI * 2);
+        ctx.fillStyle = '#f5f5f5';
+        ctx.fill();
+        ctx.strokeStyle = '#222';
+        ctx.stroke();
+
+        if (this.outputPort) this.outputPort.draw(ctx);
+    }
+}
+
+// ---------- Battery (always on) ----------
+
+class Battery extends Obj {
+    constructor(x, y) {
+        super(x, y, 60, 48);
+        this.inputPort = null;
+        this.updatePorts();
+    }
+
+    get isSource() { return true; }
+
+    evaluate() {
+        if (this.outputPort) this.outputPort.powered = true;
+    }
+
+    draw(ctx) {
+        drawBody(ctx, this.x, this.y, this.w, this.h);
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 2;
+        const cx = this.x + this.w / 2;
+        const cy = this.y + this.h / 2 - 2;
+        ctx.beginPath();
+        ctx.moveTo(cx - 12, cy);
+        ctx.lineTo(cx - 4, cy);
+        ctx.moveTo(cx + 4, cy);
+        ctx.lineTo(cx + 12, cy);
+        ctx.stroke();
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(cx - 4, cy - 8);
+        ctx.lineTo(cx - 4, cy + 8);
+        ctx.moveTo(cx + 4, cy - 5);
+        ctx.lineTo(cx + 4, cy + 5);
+        ctx.stroke();
+        if (this.outputPort) this.outputPort.draw(ctx);
+    }
+}
+
+// ---------- Button ----------
+
+class Button extends Obj {
+    constructor(x, y) {
+        super(x, y, 70, 50);
+        this.inputPort = null;
+        this.active = false;
+        this.pressStart = 0;
+        this.activeUntil = 0;
+        this.updatePorts();
+    }
+
+    get isSource() { return true; }
+
+    updateButton(now, hovering, eHeld) {
+        if (hovering && eHeld) {
+            if (!this.active) {
+                this.pressStart = now;
+            }
+            this.active = true;
+            this.activeUntil = 0;
+        } else if (this.active && this.activeUntil === 0) {
+            const elapsed = now - this.pressStart;
+            if (elapsed < BUTTON_MIN_MS) {
+                this.activeUntil = this.pressStart + BUTTON_MIN_MS;
+            } else {
+                this.active = false;
+            }
+        }
+
+        if (this.activeUntil && now >= this.activeUntil) {
+            this.active = false;
+            this.activeUntil = 0;
+        }
+    }
+
+    evaluate() {
+        if (this.outputPort) {
+            this.outputPort.powered = !!this.active;
+        }
+    }
+
+    draw(ctx) {
+        drawBody(ctx, this.x, this.y, this.w, this.h);
+        const cx = this.x + this.w / 2;
+        const cy = this.y + this.h / 2 - 2;
+        const r = 12;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.fillStyle = this.active ? '#ef4444' : '#991b1b';
+        ctx.fill();
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        if (this.outputPort) this.outputPort.draw(ctx);
+    }
+}
+
+// ---------- Lamp (input only) ----------
+
+class Lamp extends Obj {
+    constructor(x, y) {
+        super(x, y, 56, 64);
+        this.outputPort = null;
+        this.updatePorts();
+    }
+
+    updatePorts() {
+        if (this.inputPort) {
+            this.inputPort.x = this.x + this.w / 2;
+            this.inputPort.y = this.y;
+            if (this.inputPort.connectedTo && this.inputPort.connectedTo.owner.isWire) {
+                this.inputPort.connectedTo.x = this.inputPort.x;
+                this.inputPort.connectedTo.y = this.inputPort.y;
+            }
+        }
+    }
+
+    evaluate() {
+        // no output
+    }
+
+    get lit() {
+        return this.inputSignal(this.inputPort);
+    }
+
+    draw(ctx) {
+        drawBody(ctx, this.x, this.y + this.h * 0.55, this.w, this.h * 0.45);
+
+        const cx = this.x + this.w / 2;
+        const by = this.y + this.h * 0.38;
+        const br = this.w * 0.32;
+
+        if (this.lit) {
+            const grd = ctx.createRadialGradient(cx, by, 2, cx, by, br * 2.2);
+            grd.addColorStop(0, 'rgba(255, 220, 100, 0.85)');
+            grd.addColorStop(0.5, 'rgba(255, 200, 60, 0.35)');
+            grd.addColorStop(1, 'rgba(255, 180, 40, 0)');
+            ctx.fillStyle = grd;
+            ctx.beginPath();
+            ctx.arc(cx, by, br * 2.2, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.arc(cx, by, br, 0, Math.PI * 2);
+            ctx.fillStyle = '#fde68a';
+            ctx.fill();
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        } else {
+            ctx.beginPath();
+            ctx.arc(cx, by, br, 0, Math.PI * 2);
+            ctx.fillStyle = BODY_FILL;
+            ctx.fill();
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(cx - 6, by + 4);
+            ctx.lineTo(cx - 2, by - 4);
+            ctx.lineTo(cx + 2, by + 4);
+            ctx.lineTo(cx + 6, by - 4);
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+        }
+
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1.5;
+        const neckY = this.y + this.h * 0.55;
+        ctx.beginPath();
+        ctx.moveTo(cx - 8, by + br - 2);
+        ctx.lineTo(cx - 8, neckY);
+        ctx.moveTo(cx + 8, by + br - 2);
+        ctx.lineTo(cx + 8, neckY);
+        ctx.stroke();
+
+        if (this.inputPort) this.inputPort.draw(ctx);
+    }
+}
+
+class Wire {
+    constructor(x1, y1, x2, y2) {
+        this.inputPort = new Port(x1, y1, 'input', this);
+        this.outputPort = new Port(x2, y2, 'output', this);
+        this.isWire = true;
+    }
+
+    get length() {
+        return dist(
+            this.inputPort.x, this.inputPort.y,
+            this.outputPort.x, this.outputPort.y
+        );
+    }
+
+    get powered() {
+        return this.inputPort.powered || this.outputPort.powered;
+    }
+
+    attachedObject(port) {
+        if (port.connectedTo && port.connectedTo.owner instanceof Obj) {
+            return port.connectedTo.owner;
+        }
+        return null;
+    }
+
+    hitBody(px, py, threshold = 8) {
+        const info = pointToSegment(
+            px, py,
+            this.inputPort.x, this.inputPort.y,
+            this.outputPort.x, this.outputPort.y
+        );
+        if (this.inputPort.contains(px, py) || this.outputPort.contains(px, py)) {
+            return false;
+        }
+        return info.dist <= threshold;
+    }
+
+    constrainPortPosition(port, nx, ny, objects, canvas) {
+        const other = port === this.inputPort ? this.outputPort : this.inputPort;
+
+        let dx = nx - other.x;
+        let dy = ny - other.y;
+        let len = Math.hypot(dx, dy);
+        if (len > MAX_WIRE_LENGTH) {
+            const s = MAX_WIRE_LENGTH / len;
+            nx = other.x + dx * s;
+            ny = other.y + dy * s;
+        }
+
+        const attached = this.attachedObject(other);
+        const hit = raycastObjects(other.x, other.y, nx, ny, objects, attached);
+        nx = hit.x;
+        ny = hit.y;
+
+        const r = port.radius;
+        nx = Math.max(r, Math.min(nx, canvas.width - r));
+        ny = Math.max(r, Math.min(ny, canvas.height - r));
+        return { x: nx, y: ny };
+    }
+
+    movePort(port, nx, ny, objects, canvas) {
+        const p = this.constrainPortPosition(port, nx, ny, objects, canvas);
+        port.x = p.x;
+        port.y = p.y;
+    }
+
+    snapPortOnRelease(port, objects, canvas) {
+        const other = port === this.inputPort ? this.outputPort : this.inputPort;
+        let dx = port.x - other.x;
+        let dy = port.y - other.y;
+        let len = Math.hypot(dx, dy);
+        if (len < 1) len = 1;
+
+        let angle = Math.atan2(dy, dx) * (180 / Math.PI);
+        angle = snapAngle(angle);
+        const rad = angle * (Math.PI / 180);
+
+        let nx = other.x + Math.cos(rad) * len;
+        let ny = other.y + Math.sin(rad) * len;
+
+        const p = this.constrainPortPosition(port, nx, ny, objects, canvas);
+        const r = port.radius;
+        nx = snapGrid(p.x - r, 2 * r, canvas.width) + r;
+        ny = snapGrid(p.y - r, 2 * r, canvas.height) + r;
+        const p2 = this.constrainPortPosition(port, nx, ny, objects, canvas);
+        port.x = p2.x;
+        port.y = p2.y;
+    }
+
+    draw(ctx) {
+        ctx.beginPath();
+        ctx.moveTo(this.inputPort.x, this.inputPort.y);
+        ctx.lineTo(this.outputPort.x, this.outputPort.y);
+        ctx.strokeStyle = this.powered ? '#3b82f6' : '#333';
+        ctx.lineWidth = WIRE_WIDTH;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+        this.inputPort.draw(ctx);
+        this.outputPort.draw(ctx);
+    }
+
+    getPorts() {
+        return [this.inputPort, this.outputPort];
+    }
+}
 
 // ---------- app state ----------
 
@@ -214,28 +1047,39 @@ function getWiresTouchingGroup(group) {
     return result;
 }
 
-function tryConnect(port, allowObjObj = true) {
+function tryConnect(port, extraRadius = 4) {
     if (port.isConnected) return false;
+    let best = null;
+    let bestDist = Infinity;
     for (const other of allPorts()) {
         if (other === port) continue;
         if (other.owner === port.owner) continue;
         if (other.isConnected) continue;
         if (port.type === other.type) continue;
-        const bothObj = (port.owner instanceof Obj) && (other.owner instanceof Obj);
-        if (bothObj && !allowObjObj) continue;
-        if (circlesOverlap(port.x, port.y, port.radius, other.x, other.y, other.radius)) {
-            return port.connect(other, canvas);
+        const d = dist(port.x, port.y, other.x, other.y);
+        const limit = port.radius + other.radius + extraRadius;
+        if (d <= limit && d < bestDist) {
+            bestDist = d;
+            best = other;
         }
     }
-    return false;
+    if (!best) return false;
+    return port.connect(best, canvas);
 }
 
-function tryConnectObjectPorts(obj, allowObjObj = false) {
-    let connected = false;
-    for (const port of obj.getPorts()) {
-        if (tryConnect(port, allowObjObj)) connected = true;
+/** After a drag ends: connect every free port that is touching a compatible free port. */
+function connectOverlappingPorts() {
+    // Prefer wire→object first so wire ends snap onto component ports
+    const free = allPorts().filter(p => !p.isConnected);
+    free.sort((a, b) => {
+        const aw = a.owner.isWire ? 0 : 1;
+        const bw = b.owner.isWire ? 0 : 1;
+        return aw - bw;
+    });
+    for (const port of free) {
+        if (port.isConnected) continue;
+        tryConnect(port, 6);
     }
-    return connected;
 }
 
 function validateObjObjConnections() {
@@ -637,7 +1481,6 @@ canvas.addEventListener('mousedown', (e) => {
 
     const obj = findObjectAt(pos.x, pos.y);
     if (obj) {
-        const startedOnPort = !!findObjectPortAt(pos.x, pos.y);
         const group = buildDragGroup(obj, e.shiftKey);
         drag = {
             kind: 'group',
@@ -646,8 +1489,7 @@ canvas.addEventListener('mousedown', (e) => {
             offsetX: pos.x - obj.x,
             offsetY: pos.y - obj.y,
             lastPositions: group.map(o => ({ obj: o, x: o.x, y: o.y })),
-            shiftActive: e.shiftKey,
-            fromPort: startedOnPort
+            shiftActive: e.shiftKey
         };
         canvas.style.cursor = 'grabbing';
     }
@@ -701,15 +1543,6 @@ window.addEventListener('mousemove', (e) => {
         const dy = targetY - drag.obj.y;
 
         drag.lastPositions = applyGroupMove(drag.group, dx, dy, drag.lastPositions);
-
-        let didConnect = false;
-        for (const o of drag.group) {
-            if (tryConnectObjectPorts(o, !!drag.fromPort)) didConnect = true;
-        }
-        if (didConnect && drag.fromPort) {
-            drag.group = expandGroupForDirectLinks(drag.group);
-            drag.lastPositions = drag.group.map(o => ({ obj: o, x: o.x, y: o.y }));
-        }
         drag.offsetX = pos.x - drag.obj.x;
         drag.offsetY = pos.y - drag.obj.y;
     } else if (drag.kind === 'port') {
@@ -739,31 +1572,27 @@ window.addEventListener('mouseup', () => {
         const snappedX = snapGrid(primary.x, primary.w, canvas.width);
         const snappedY = snapGrid(primary.y, primary.h, canvas.height);
         applyGroupMove(drag.group, snappedX - primary.x, snappedY - primary.y, drag.lastPositions);
+        // Align already-linked object↔object ports within the group
+        const gset = new Set(drag.group);
         for (const o of drag.group) {
-            tryConnectObjectPorts(o, !!drag.fromPort);
-        }
-        if (drag.fromPort) {
-            drag.group = expandGroupForDirectLinks(drag.group);
-            for (const o of drag.group) {
-                for (const port of o.getPorts()) {
-                    if (!port.connectedTo) continue;
-                    if (!(port.connectedTo.owner instanceof Obj)) continue;
-                    const ddx = port.connectedTo.x - port.x;
-                    const ddy = port.connectedTo.y - port.y;
-                    if (Math.hypot(ddx, ddy) > 0.5) {
-                        o.x += ddx;
-                        o.y += ddy;
-                        o.x = clamp(o.x, o.w, canvas.width);
-                        o.y = clamp(o.y, o.h, canvas.height);
-                        o.updatePorts();
-                    }
+            for (const port of o.getPorts()) {
+                if (!port.connectedTo) continue;
+                if (!(port.connectedTo.owner instanceof Obj)) continue;
+                const other = port.connectedTo.owner;
+                if (!gset.has(other)) continue;
+                const ddx = port.connectedTo.x - port.x;
+                const ddy = port.connectedTo.y - port.y;
+                if (Math.hypot(ddx, ddy) > 0.5) {
+                    o.x += ddx;
+                    o.y += ddy;
+                    o.x = clamp(o.x, o.w, canvas.width);
+                    o.y = clamp(o.y, o.h, canvas.height);
+                    o.updatePorts();
                 }
             }
         }
-        validateObjObjConnections();
     } else if (drag.kind === 'port') {
         drag.wire.snapPortOnRelease(drag.port, objects, canvas);
-        tryConnect(drag.port, true);
     } else if (drag.kind === 'joint') {
         snapJointOnRelease(drag.portA, drag.portB, objects);
     } else if (drag.kind === 'wire-group') {
@@ -776,8 +1605,13 @@ window.addEventListener('mouseup', () => {
                 drag.lastPositions
             );
         }
-        validateObjObjConnections();
+    } else if (drag.kind === 'wire-translate') {
+        // ends may land on ports — handled by connectOverlappingPorts below
     }
+
+    syncAllPorts();
+    connectOverlappingPorts();
+    validateObjObjConnections();
 
     drag = null;
     canvas.style.cursor = 'default';
@@ -818,6 +1652,14 @@ window.addEventListener('keyup', (e) => {
     }
 });
 
+function endDrag() {
+    if (!drag) return;
+    // synthesize mouseup path
+    const ev = new Event('mouseup');
+    window.dispatchEvent(ev);
+}
+
+window.addEventListener('blur', endDrag);
 window.addEventListener('resize', resize);
 
 // ---------- loop ----------
