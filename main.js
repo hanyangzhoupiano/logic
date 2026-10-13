@@ -841,13 +841,16 @@ class HalfAdder extends Obj {
 
     draw(ctx) {
         drawBody(ctx, this.x, this.y, this.w, this.h);
-        drawLabel(ctx, this.x, this.y, this.w, this.h * 0.5, '½ ADD');
-        ctx.fillStyle = '#888';
-        ctx.font = '10px system-ui, sans-serif';
+        drawLabel(ctx, this.x, this.y, this.w, this.h * 0.42, '½ ADD');
+        ctx.fillStyle = '#aaa';
+        ctx.font = 'bold 10px system-ui, sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText('S', this.x + this.w * 0.3, this.y + this.h - 6);
-        ctx.fillText('C', this.x + this.w * 0.7, this.y + this.h - 6);
+        ctx.textBaseline = 'middle';
+        // above bottom ports
+        ctx.fillText('Sum', this.x + this.w * 0.3, this.y + this.h * 0.62);
+        ctx.fillText('Carry', this.x + this.w * 0.7, this.y + this.h * 0.62);
         ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
     }
 }
 
@@ -897,13 +900,15 @@ class FullAdder extends Obj {
 
     draw(ctx) {
         drawBody(ctx, this.x, this.y, this.w, this.h);
-        drawLabel(ctx, this.x, this.y, this.w, this.h * 0.5, 'FULL ADD');
-        ctx.fillStyle = '#888';
-        ctx.font = '10px system-ui, sans-serif';
+        drawLabel(ctx, this.x, this.y, this.w, this.h * 0.42, 'FULL ADD');
+        ctx.fillStyle = '#aaa';
+        ctx.font = 'bold 10px system-ui, sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText('S', this.x + this.w * 0.35, this.y + this.h - 6);
-        ctx.fillText('C', this.x + this.w * 0.65, this.y + this.h - 6);
+        ctx.textBaseline = 'middle';
+        ctx.fillText('Sum', this.x + this.w * 0.35, this.y + this.h * 0.62);
+        ctx.fillText('Carry', this.x + this.w * 0.65, this.y + this.h * 0.62);
         ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
     }
 }
 
@@ -1103,6 +1108,7 @@ let levelCases = null;         // [{goal, values: {id: n}}, ...] or null
 let caseIndex = 0;
 let satisfiedHold = 0;         // seconds goal has been continuously satisfied
 let levelWon = false;
+let onSelectScreen = true;
 const SATISFY_TIME = 0.35;
 
 function bitsFromValue(value, n) {
@@ -1266,8 +1272,13 @@ const LEVELS = [
             objects.push(new FullAdder(280, 220));
             objects.push(new FullAdder(280, 300));
             objects.push(new HalfAdder(400, 60)); // extra
-            for (let i = 0; i < 10; i++) {
-                wires.push(new Wire(500 + (i % 3) * 20, 80 + i * 28, 560 + (i % 3) * 20, 80 + i * 28));
+            for (let i = 0; i < 22; i++) {
+                const col = i % 4;
+                const row = Math.floor(i / 4);
+                wires.push(new Wire(
+                    500 + col * 18, 70 + row * 36,
+                    560 + col * 18, 70 + row * 36
+                ));
             }
             const goal = new Goal(640, 200, cases[0].goal);
             objects.push(goal);
@@ -1287,8 +1298,13 @@ const LEVELS = [
             objects.push(new FullAdder(250, 130));
             objects.push(new FullAdder(250, 210));
             objects.push(new FullAdder(250, 290));
-            for (let i = 0; i < 8; i++) {
-                wires.push(new Wire(420, 60 + i * 32, 480, 60 + i * 32));
+            for (let i = 0; i < 20; i++) {
+                const col = i % 4;
+                const row = Math.floor(i / 4);
+                wires.push(new Wire(
+                    400 + col * 16, 50 + row * 38,
+                    460 + col * 16, 50 + row * 38
+                ));
             }
             const goal = new Goal(560, 180, cases[0].goal);
             objects.push(goal);
@@ -1311,8 +1327,13 @@ const LEVELS = [
             objects.push(new HalfAdder(370, 40));
             objects.push(new OR(370, 140));
             objects.push(new AND(370, 220));
-            for (let i = 0; i < 12; i++) {
-                wires.push(new Wire(480, 50 + i * 30, 540, 50 + i * 30));
+            for (let i = 0; i < 24; i++) {
+                const col = i % 4;
+                const row = Math.floor(i / 4);
+                wires.push(new Wire(
+                    460 + col * 16, 40 + row * 36,
+                    520 + col * 16, 40 + row * 36
+                ));
             }
             const goal = new Goal(600, 160, cases[0].goal);
             objects.push(goal);
@@ -1365,6 +1386,44 @@ function applyCase(idx) {
     updateGoalUI();
 }
 
+function setPlayUI(playing) {
+    onSelectScreen = !playing;
+    document.getElementById('level-select').hidden = playing;
+    document.getElementById('hud').hidden = !playing;
+    document.getElementById('hint').hidden = !playing;
+}
+
+function buildLevelSelect() {
+    const grid = document.getElementById('level-grid');
+    grid.innerHTML = '';
+    LEVELS.forEach((lvl, i) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'level-card';
+        btn.innerHTML =
+            '<div class="num">Level ' + (i + 1) + '</div>' +
+            '<div class="name">' + lvl.name + '</div>' +
+            '<div class="blurb">' + lvl.desc + '</div>';
+        btn.addEventListener('click', () => loadLevel(i));
+        grid.appendChild(btn);
+    });
+}
+
+function showLevelSelect() {
+    objects = [];
+    wires = [];
+    drag = null;
+    levelGoal = null;
+    levelBitNums = [];
+    levelCases = null;
+    caseIndex = 0;
+    satisfiedHold = 0;
+    levelWon = false;
+    document.getElementById('win-overlay').classList.remove('show');
+    setPlayUI(false);
+    buildLevelSelect();
+}
+
 function loadLevel(index) {
     currentLevel = Math.max(0, Math.min(index, LEVELS.length - 1));
     objects = [];
@@ -1377,6 +1436,7 @@ function loadLevel(index) {
     satisfiedHold = 0;
     levelWon = false;
     document.getElementById('win-overlay').classList.remove('show');
+    setPlayUI(true);
 
     const meta = LEVELS[currentLevel].build();
     levelGoal = meta.goal;
@@ -1408,7 +1468,7 @@ function showWin() {
 }
 
 function checkGoal(dt) {
-    if (levelWon || !levelGoal) return;
+    if (onSelectScreen || levelWon || !levelGoal) return;
     if (levelGoal.isSatisfied()) {
         satisfiedHold += dt;
         if (satisfiedHold >= SATISFY_TIME) {
@@ -1425,11 +1485,17 @@ function checkGoal(dt) {
 }
 
 document.getElementById('btn-next').addEventListener('click', () => {
-    if (currentLevel >= LEVELS.length - 1) loadLevel(0);
+    if (currentLevel >= LEVELS.length - 1) showLevelSelect();
     else loadLevel(currentLevel + 1);
 });
 document.getElementById('btn-replay').addEventListener('click', () => {
     loadLevel(currentLevel);
+});
+document.getElementById('btn-win-levels').addEventListener('click', () => {
+    showLevelSelect();
+});
+document.getElementById('btn-levels').addEventListener('click', () => {
+    showLevelSelect();
 });
 
 function resize() {
@@ -2319,5 +2385,5 @@ function loop(now) {
 }
 
 resize();
-loadLevel(0);
+showLevelSelect();
 requestAnimationFrame(loop);
