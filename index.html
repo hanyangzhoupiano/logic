@@ -9,36 +9,42 @@
 <body>
   <canvas id="canvas"></canvas>
   <div id="ui">
-    <div id="level-select" class="panel">
+    <div id="title-screen" class="panel">
       <h1>Logic Gates</h1>
-      <p class="subtitle">Build circuits. Match the goal.</p>
-      <div id="level-grid"></div>
+      <p class="subtitle">Defend the Core. Build circuits. Survive 50 waves.</p>
+      <button id="btn-play" type="button">Play</button>
     </div>
 
     <div id="hud" hidden>
-      <div id="level-info" class="panel">
-        <h1 id="level-title">Level 1</h1>
-        <p id="level-desc"></p>
+      <div id="hud-info" class="panel">
+        <h1 id="wave-title">Wave 0 / 50</h1>
+        <p id="wave-status">Prepare — 30s</p>
       </div>
       <div class="hud-right">
-        <div id="goal-box" class="panel">
-          <div class="label">Goal</div>
-          <div class="pattern" id="goal-pattern"></div>
-          <div class="case" id="goal-case"></div>
-        </div>
-        <button id="btn-levels" class="panel btn-levels" type="button">Levels</button>
+        <div id="core-hud" class="panel">Core HP —</div>
+        <button id="btn-menu" class="panel btn-menu" type="button">Menu</button>
       </div>
     </div>
-    <div id="hint" class="panel" hidden>Drag components · Connect ports on release · E toggle lever / disconnect</div>
-    <div id="win-overlay">
-      <div id="win-card" class="panel">
-        <h2 id="win-title">Level Complete!</h2>
-        <p id="win-msg">Nice work.</p>
-        <button id="btn-next">Next Level</button>
-        <button id="btn-replay" class="secondary">Replay</button>
-        <button id="btn-win-levels" class="secondary">Level Select</button>
+    <div id="hint" class="panel" hidden>Drag · Q/E rotate while dragging · Backspace delete while dragging · double-click number to edit</div>
+
+    <div id="pick-overlay" hidden>
+      <div class="panel pick-card">
+        <h2>Choose a component</h2>
+        <p class="pick-sub">Wave milestone — pick 1 of 3 (you also get a free crossbow)</p>
+        <div id="pick-choices"></div>
       </div>
     </div>
+
+    <div id="end-overlay" hidden>
+      <div class="panel end-card">
+        <h2 id="end-title">Game Over</h2>
+        <p id="end-msg"></p>
+        <button id="btn-restart" type="button">Restart</button>
+        <button id="btn-end-menu" class="secondary" type="button">Menu</button>
+      </div>
+    </div>
+
+    <input id="num-edit" type="number" hidden />
   </div>
   <script src="main.js"></script>
 </body>
