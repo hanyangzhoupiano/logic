@@ -2085,24 +2085,25 @@ class Conveyor extends Obj {
 
 /**
  * Glue — green circle. Objects overlapping it form a rigid group.
- * Drag near rim to resize (8..50px). E while hovering detaches (deletes glue).
+ * Drag near rim to resize (10..50px). E toggles detach (stops sticking without deleting).
  */
 class Glue extends Obj {
     constructor(x, y, radius = 22) {
-        const r = Math.max(8, Math.min(50, radius));
+        const r = Math.max(10, Math.min(50, radius));
         super(x - r, y - r, r * 2, r * 2);
         this.inputPort = null;
         this.outputPort = null;
         this.radius = r;
         this.noCollision = true;
         this.isGlue = true;
+        this.active = true; // false = detached, no sticking
     }
 
     get centerX() { return this.x + this.w / 2; }
     get centerY() { return this.y + this.h / 2; }
 
     setRadius(r) {
-        r = Math.max(8, Math.min(50, r));
+        r = Math.max(10, Math.min(50, r));
         const cx = this.centerX;
         const cy = this.centerY;
         this.radius = r;
@@ -2118,7 +2119,7 @@ class Glue extends Obj {
 
     /** True if object body intersects this glue circle. */
     overlapsObject(o) {
-        // circle vs AABB
+        if (!this.active) return false;
         const cx = this.centerX;
         const cy = this.centerY;
         const nx = Math.max(o.x, Math.min(cx, o.x + o.w));
@@ -2134,7 +2135,7 @@ class Glue extends Obj {
         const cx = this.centerX;
         const cy = this.centerY;
         const r = this.radius;
-        // soft fill
+        if (!this.active) ctx.globalAlpha = 0.35;
         const grd = ctx.createRadialGradient(cx - r * 0.2, cy - r * 0.2, r * 0.1, cx, cy, r);
         grd.addColorStop(0, 'rgba(120, 220, 100, 0.55)');
         grd.addColorStop(0.7, 'rgba(40, 160, 70, 0.4)');
@@ -2172,6 +2173,14 @@ class Glue extends Obj {
             );
             ctx.stroke();
         }
+        ctx.globalAlpha = 1;
+        if (!this.active) {
+            ctx.fillStyle = '#ccc';
+            ctx.font = '9px system-ui, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('DETACHED', cx, cy);
+            ctx.textAlign = 'left';
+        }
     }
 }
 
@@ -2179,33 +2188,45 @@ class Glue extends Obj {
 
 // ---------- Combat entities ----------
 
-const ARROW_MAX_SPEED = 520;
-const ARROW_MIN_SPEED = 80;
-const ARROW_LIFETIME = 10;
+const PROJ_MAX_SPEED = 520;
+const PROJ_MIN_SPEED = 80;
+let explosions = []; // visual + optional lingering damage already applied on create
 
-class Arrow {
-    constructor(x, y, angleDeg, speed = 380) {
+function angleDiff(a, b) {
+    return ((b - a + 540) % 360) - 180;
+}
+
+function nearestEnemies(x, y, n) {
+    const list = enemies.filter(e => !e.dead).map(e => ({
+        e,
+        d: dist(x, y, e.x + e.w / 2, e.y + e.h / 2)
+    }));
+    list.sort((a, b) => a.d - b.d);
+    return list.slice(0, n).map(x => x.e);
+}
+
+/** Shared projectile: linger when blocked by crate/door instead of despawning. */
+class Projectile {
+    constructor(x, y, angleDeg, speed, opts = {}) {
         this.x = x;
         this.y = y;
         this.angle = angleDeg;
-        this.speed = Math.min(ARROW_MAX_SPEED, Math.max(ARROW_MIN_SPEED, speed));
+        this.speed = Math.min(PROJ_MAX_SPEED, Math.max(PROJ_MIN_SPEED, speed));
+        this.damage = opts.damage != null ? opts.damage : 15;
+        this.lifetime = opts.lifetime != null ? opts.lifetime : 10;
         this.age = 0;
         this.dead = false;
-        this.w = 14;
-        this.h = 4;
+        this.blocked = false;
+        this.kind = opts.kind || 'arrow';
+        this.home = !!opts.home;
+        this.maxTurn = opts.maxTurn != null ? opts.maxTurn : 0; // deg/s
+        this.aoe = opts.aoe || null; // { radius, damage }
+        this.onExplode = opts.onExplode || null;
     }
 
     get isWire() { return false; }
 
-    tick(dt) {
-        if (this.dead) return;
-        this.age += dt;
-        if (this.age >= ARROW_LIFETIME) {
-            this.dead = true;
-            return;
-        }
-
-        // Conveyor influence
+    applyConveyors(dt) {
         for (const o of objects) {
             if (!(o instanceof Conveyor)) continue;
             if (!o.inputSignal(o.inputPort)) continue;
@@ -2215,94 +2236,180 @@ class Arrow {
             else if (o.dir === 'left') cAng = 180;
             else if (o.dir === 'down') cAng = 90;
             else cAng = 270;
-            // blend heading slightly toward conveyor
-            let diff = ((cAng - this.angle + 540) % 360) - 180;
+            const diff = angleDiff(this.angle, cAng);
             this.angle += diff * Math.min(1, 2.5 * dt);
-            // speed up / slow down based on alignment
             const align = Math.cos(diff * Math.PI / 180);
             this.speed += align * 180 * dt;
-            this.speed = Math.min(ARROW_MAX_SPEED, Math.max(ARROW_MIN_SPEED, this.speed));
+            this.speed = Math.min(PROJ_MAX_SPEED, Math.max(PROJ_MIN_SPEED, this.speed));
         }
+    }
+
+    blockedBySolid(nx, ny) {
+        for (const o of objects) {
+            if (o instanceof Door && !o.open) {
+                if (rectsOverlap(nx - 2, ny - 2, 4, 4, o.x, o.y, o.w, o.h)) return true;
+            }
+            if (o instanceof Crate) {
+                if (rectsOverlap(nx - 2, ny - 2, 4, 4, o.x, o.y, o.w, o.h)) return true;
+            }
+        }
+        return false;
+    }
+
+    tick(dt) {
+        if (this.dead) return;
+        this.age += dt;
+        if (this.age >= this.lifetime) {
+            this.dead = true;
+            return;
+        }
+
+        // Homing
+        if (this.home) {
+            const targets = nearestEnemies(this.x, this.y, 1);
+            if (targets.length) {
+                const e = targets[0];
+                const desired = Math.atan2(e.y + e.h / 2 - this.y, e.x + e.w / 2 - this.x) * 180 / Math.PI;
+                const diff = angleDiff(this.angle, desired);
+                const maxStep = this.maxTurn * dt;
+                this.angle += Math.max(-maxStep, Math.min(maxStep, diff));
+            }
+        }
+
+        this.applyConveyors(dt);
 
         const rad = this.angle * Math.PI / 180;
         const nx = this.x + Math.cos(rad) * this.speed * dt;
         const ny = this.y + Math.sin(rad) * this.speed * dt;
 
-        // Blocked by closed doors and crates
-        for (const o of objects) {
-            if (o instanceof Door && !o.open) {
-                if (rectsOverlap(nx - 2, ny - 2, 4, 4, o.x, o.y, o.w, o.h)) {
-                    this.dead = true;
-                    return;
-                }
-            }
-            if (o instanceof Crate) {
-                if (rectsOverlap(nx - 2, ny - 2, 4, 4, o.x, o.y, o.w, o.h)) {
-                    this.dead = true;
-                    return;
-                }
-            }
+        if (this.blockedBySolid(nx, ny)) {
+            // linger in place; keep velocity/heading for when path clears
+            this.blocked = true;
+        } else {
+            this.blocked = false;
+            this.x = nx;
+            this.y = ny;
         }
 
-        this.x = nx;
-        this.y = ny;
-
-        // Hit enemies
+        // Hit enemies (rockets explode)
         for (const e of enemies) {
             if (e.dead) continue;
-            if (rectsOverlap(this.x - 3, this.y - 3, 6, 6, e.x, e.y, e.w, e.h)) {
+            if (!rectsOverlap(this.x - 4, this.y - 4, 8, 8, e.x, e.y, e.w, e.h)) continue;
+            if (this.aoe) {
+                this.explode();
+            } else {
                 e.takeHit(this);
                 this.dead = true;
-                return;
             }
+            return;
         }
 
-        // Off-screen
-        if (this.x < -40 || this.y < -40 || this.x > canvas.width + 40 || this.y > canvas.height + 40) {
+        if (this.x < -60 || this.y < -60 || this.x > canvas.width + 60 || this.y > canvas.height + 60) {
             this.dead = true;
         }
+    }
+
+    explode() {
+        if (this.dead) return;
+        this.dead = true;
+        const R = this.aoe.radius;
+        const dmg = this.aoe.damage;
+        for (const e of enemies) {
+            if (e.dead) continue;
+            const cx = e.x + e.w / 2, cy = e.y + e.h / 2;
+            if (dist(this.x, this.y, cx, cy) <= R) {
+                e.takeHit({ angle: this.angle, speed: this.speed, damage: dmg });
+            }
+        }
+        explosions.push({
+            x: this.x, y: this.y, r: 8, maxR: R, age: 0, life: 0.55,
+            particles: Array.from({ length: 18 }, () => ({
+                ang: Math.random() * Math.PI * 2,
+                spd: 40 + Math.random() * 160,
+                life: 0.3 + Math.random() * 0.35
+            }))
+        });
     }
 
     draw(ctx) {
         ctx.save();
         ctx.translate(this.x, this.y);
         ctx.rotate(this.angle * Math.PI / 180);
-        ctx.fillStyle = '#d4d4d8';
-        ctx.fillRect(-8, -1.5, 14, 3);
-        ctx.fillStyle = '#888';
-        ctx.beginPath();
-        ctx.moveTo(6, 0);
-        ctx.lineTo(12, -3);
-        ctx.lineTo(12, 3);
-        ctx.closePath();
-        ctx.fill();
-        ctx.fillStyle = '#b91c1c';
-        ctx.fillRect(-10, -2.5, 4, 5);
+        if (this.kind === 'rocket') {
+            ctx.fillStyle = '#f97316';
+            ctx.fillRect(-10, -4, 18, 8);
+            ctx.fillStyle = '#78716c';
+            ctx.fillRect(-12, -5, 4, 10);
+            ctx.fillStyle = '#fbbf24';
+            ctx.beginPath();
+            ctx.moveTo(8, 0); ctx.lineTo(16, -5); ctx.lineTo(16, 5); ctx.closePath();
+            ctx.fill();
+        } else if (this.kind === 'bolt') {
+            ctx.fillStyle = '#a8a29e';
+            ctx.fillRect(-12, -2.5, 20, 5);
+            ctx.fillStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(8, 0); ctx.lineTo(16, -4); ctx.lineTo(16, 4); ctx.closePath();
+            ctx.fill();
+        } else if (this.kind === 'pellet') {
+            ctx.fillStyle = '#e5e5e5';
+            ctx.beginPath();
+            ctx.arc(0, 0, 3.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#555';
+            ctx.stroke();
+        } else {
+            ctx.fillStyle = '#d4d4d8';
+            ctx.fillRect(-8, -1.5, 14, 3);
+            ctx.fillStyle = '#888';
+            ctx.beginPath();
+            ctx.moveTo(6, 0); ctx.lineTo(12, -3); ctx.lineTo(12, 3); ctx.closePath();
+            ctx.fill();
+            ctx.fillStyle = '#b91c1c';
+            ctx.fillRect(-10, -2.5, 4, 5);
+        }
+        if (this.blocked) {
+            ctx.restore();
+            ctx.strokeStyle = 'rgba(255,200,50,0.7)';
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, 7, 0, Math.PI * 2);
+            ctx.stroke();
+            return;
+        }
         ctx.restore();
     }
 }
 
-class Crossbow extends Obj {
-    constructor(x, y) {
-        super(x, y, 70, 48);
+// keep name Arrow for compatibility
+class Arrow extends Projectile {
+    constructor(x, y, angleDeg, speed = 400) {
+        super(x, y, angleDeg, speed, { damage: 15, lifetime: 10, kind: 'arrow' });
+    }
+}
+
+/** Shared turret: FIRE + RELOAD inputs, ammo, cooldown, reload. */
+class WeaponTurret extends Obj {
+    constructor(x, y, w, h, cfg) {
+        super(x, y, w, h);
         this.inputPort = null;
         this.outputPort = null;
         this.shootPort = new Port(0, 0, 'input', this);
         this.reloadPort = new Port(0, 0, 'input', this);
-        this.ammo = 5;
-        this.maxAmmo = 5;
+        this.ammo = cfg.ammo;
+        this.maxAmmo = cfg.ammo;
+        this.ammoPerShot = cfg.ammoPerShot || 1;
         this.cooldown = 0;
         this.reloading = false;
         this.reloadTimer = 0;
-        this.reloadDuration = 3;
-        this.shootCooldown = 0.3;
+        this.reloadDuration = cfg.reload;
+        this.shootCooldown = cfg.cooldown;
         this.prevShoot = false;
         this.prevReload = false;
+        this.weaponLabel = cfg.label || 'GUN';
         this.updatePorts();
     }
 
     updatePorts() {
-        // Shoot (main) on left, reload on right of top edge
         if (this.shootPort) {
             this.shootPort.x = this.x + this.w * 0.3;
             this.shootPort.y = this.y;
@@ -2321,39 +2428,30 @@ class Crossbow extends Obj {
         }
     }
 
-    facingAngle() {
-        return this.angle; // 0 = right
-    }
+    facingAngle() { return this.angle; }
 
     findTargetAngle() {
-        if (enemies.length === 0) return this.facingAngle();
-        const cx = this.x + this.w / 2;
-        const cy = this.y + this.h / 2;
-        let best = null, bestD = Infinity;
-        for (const e of enemies) {
-            if (e.dead) continue;
-            const d = dist(cx, cy, e.x + e.w / 2, e.y + e.h / 2);
-            if (d < bestD) { bestD = d; best = e; }
-        }
-        if (!best) return this.facingAngle();
-        return Math.atan2(best.y + best.h / 2 - cy, best.x + best.w / 2 - cx) * 180 / Math.PI;
+        const cx = this.x + this.w / 2, cy = this.y + this.h / 2;
+        const t = nearestEnemies(cx, cy, 1);
+        if (!t.length) return this.facingAngle();
+        const e = t[0];
+        return Math.atan2(e.y + e.h / 2 - cy, e.x + e.w / 2 - cx) * 180 / Math.PI;
     }
+
+    /** Override in subclasses to spawn projectiles. Return true if shot fired. */
+    fireProjectiles() { return false; }
 
     tryShoot() {
         if (this.reloading) return;
         if (this.cooldown > 0) return;
-        if (this.ammo <= 0) {
+        if (this.ammo < this.ammoPerShot) {
             this.startReload();
             return;
         }
-        const ang = this.findTargetAngle();
-        const rad = ang * Math.PI / 180;
-        const cx = this.x + this.w / 2 + Math.cos(rad) * 28;
-        const cy = this.y + this.h / 2 + Math.sin(rad) * 28;
-        arrows.push(new Arrow(cx, cy, ang, 400));
-        this.ammo--;
+        if (!this.fireProjectiles()) return;
+        this.ammo -= this.ammoPerShot;
         this.cooldown = this.shootCooldown;
-        if (this.ammo <= 0) this.startReload();
+        if (this.ammo < this.ammoPerShot) this.startReload();
     }
 
     startReload() {
@@ -2375,25 +2473,63 @@ class Crossbow extends Obj {
                 this.reloadTimer = 0;
             }
         }
-
         const shoot = this.inputSignal(this.shootPort);
         const reload = this.inputSignal(this.reloadPort);
-
-        // continuous or rising: while powered, fire on cooldown
-        if (shoot) {
-            this.tryShoot();
-        }
-        // manual reload on rising edge
-        if (reload && !this.prevReload) {
-            this.startReload();
-        }
+        if (shoot) this.tryShoot();
+        if (reload && !this.prevReload) this.startReload();
         this.prevShoot = shoot;
         this.prevReload = reload;
     }
 
+    drawWeaponArt(ctx) {
+        // override
+    }
+
     draw(ctx) {
         drawBody(ctx, this.x, this.y, this.w, this.h);
-        // bow shape
+        this.drawWeaponArt(ctx);
+        ctx.fillStyle = '#9ca3af';
+        ctx.font = '8px system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('FIRE', this.x + this.w * 0.28, this.y + 11);
+        ctx.fillText('RLOD', this.x + this.w * 0.72, this.y + 11);
+        ctx.fillStyle = '#eee';
+        ctx.font = 'bold 11px system-ui, sans-serif';
+        ctx.fillText(this.reloading ? '…' : (this.ammo + '/' + this.maxAmmo), this.x + this.w / 2, this.y + this.h - 10);
+        ctx.fillStyle = '#aaa';
+        ctx.font = '9px system-ui, sans-serif';
+        ctx.fillText(this.weaponLabel, this.x + this.w / 2, this.y + this.h * 0.45);
+        ctx.textAlign = 'left';
+        if (this.reloading) {
+            const t = this.reloadTimer / this.reloadDuration;
+            ctx.fillStyle = '#222';
+            ctx.fillRect(this.x + 8, this.y + this.h - 6, this.w - 16, 4);
+            ctx.fillStyle = '#eab308';
+            ctx.fillRect(this.x + 8, this.y + this.h - 6, (this.w - 16) * t, 4);
+        }
+        const ang = this.angle * Math.PI / 180;
+        const cx = this.x + this.w / 2, cy = this.y + this.h / 2;
+        ctx.strokeStyle = '#3b82f6';
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + Math.cos(ang) * 22, cy + Math.sin(ang) * 22);
+        ctx.stroke();
+    }
+}
+
+class Crossbow extends WeaponTurret {
+    constructor(x, y) {
+        super(x, y, 70, 48, { ammo: 5, cooldown: 0.3, reload: 3, label: 'XBOW' });
+    }
+    fireProjectiles() {
+        const ang = this.findTargetAngle();
+        const rad = ang * Math.PI / 180;
+        const cx = this.x + this.w / 2 + Math.cos(rad) * 28;
+        const cy = this.y + this.h / 2 + Math.sin(rad) * 28;
+        arrows.push(new Arrow(cx, cy, ang, 400));
+        return true;
+    }
+    drawWeaponArt(ctx) {
         ctx.strokeStyle = '#a3a3a3';
         ctx.lineWidth = 2;
         ctx.beginPath();
@@ -2403,34 +2539,99 @@ class Crossbow extends Obj {
         ctx.moveTo(this.x + 12, this.y + this.h / 2);
         ctx.lineTo(this.x + this.w - 10, this.y + this.h / 2);
         ctx.stroke();
-        // labels
-        ctx.fillStyle = '#9ca3af';
-        ctx.font = '8px system-ui, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('FIRE', this.x + this.w * 0.28, this.y + 11);
-        ctx.fillText('RLOD', this.x + this.w * 0.72, this.y + 11);
-        // ammo
-        ctx.fillStyle = '#eee';
-        ctx.font = 'bold 11px system-ui, sans-serif';
-        ctx.fillText(this.reloading ? '…' : (this.ammo + '/' + this.maxAmmo), this.x + this.w / 2, this.y + this.h - 10);
-        ctx.textAlign = 'left';
-        // reload bar
-        if (this.reloading) {
-            const t = this.reloadTimer / this.reloadDuration;
-            ctx.fillStyle = '#222';
-            ctx.fillRect(this.x + 8, this.y + this.h - 6, this.w - 16, 4);
-            ctx.fillStyle = '#eab308';
-            ctx.fillRect(this.x + 8, this.y + this.h - 6, (this.w - 16) * t, 4);
+    }
+}
+
+class Ballista extends WeaponTurret {
+    constructor(x, y) {
+        super(x, y, 78, 52, { ammo: 2, cooldown: 0.5, reload: 3, label: 'BALISTA' });
+    }
+    fireProjectiles() {
+        const ang = this.findTargetAngle();
+        const rad = ang * Math.PI / 180;
+        const cx = this.x + this.w / 2 + Math.cos(rad) * 32;
+        const cy = this.y + this.h / 2 + Math.sin(rad) * 32;
+        arrows.push(new Projectile(cx, cy, ang, 360, { damage: 40, lifetime: 10, kind: 'bolt' }));
+        return true;
+    }
+    drawWeaponArt(ctx) {
+        ctx.fillStyle = '#78716c';
+        ctx.fillRect(this.x + 10, this.y + this.h / 2 - 4, this.w - 20, 8);
+        ctx.strokeStyle = '#a8a29e';
+        ctx.strokeRect(this.x + 10, this.y + this.h / 2 - 4, this.w - 20, 8);
+    }
+}
+
+class Scatterbow extends WeaponTurret {
+    constructor(x, y) {
+        super(x, y, 74, 50, { ammo: 9, ammoPerShot: 3, cooldown: 0.35, reload: 4, label: 'SCATTER' });
+    }
+    fireProjectiles() {
+        const cx0 = this.x + this.w / 2;
+        const cy0 = this.y + this.h / 2;
+        let targets = nearestEnemies(cx0, cy0, 3);
+        if (targets.length === 0) {
+            // fire three along facing with slight spread
+            const base = this.facingAngle();
+            for (let i = -1; i <= 1; i++) {
+                const ang = base + i * 12;
+                const rad = ang * Math.PI / 180;
+                arrows.push(new Projectile(
+                    cx0 + Math.cos(rad) * 26, cy0 + Math.sin(rad) * 26, ang, 420,
+                    { damage: 10, lifetime: 10, kind: 'pellet' }
+                ));
+            }
+            return true;
         }
-        // facing tick
-        const ang = this.angle * Math.PI / 180;
-        const cx = this.x + this.w / 2;
-        const cy = this.y + this.h / 2;
-        ctx.strokeStyle = '#3b82f6';
-        ctx.beginPath();
-        ctx.moveTo(cx, cy);
-        ctx.lineTo(cx + Math.cos(ang) * 22, cy + Math.sin(ang) * 22);
-        ctx.stroke();
+        // pad to 3 by repeating closest
+        while (targets.length < 3) targets.push(targets[0]);
+        for (let i = 0; i < 3; i++) {
+            const e = targets[i];
+            const ang = Math.atan2(e.y + e.h / 2 - cy0, e.x + e.w / 2 - cx0) * 180 / Math.PI;
+            const rad = ang * Math.PI / 180;
+            arrows.push(new Projectile(
+                cx0 + Math.cos(rad) * 26, cy0 + Math.sin(rad) * 26, ang, 420,
+                { damage: 10, lifetime: 10, kind: 'pellet' }
+            ));
+        }
+        return true;
+    }
+    drawWeaponArt(ctx) {
+        ctx.strokeStyle = '#d6d3d1';
+        ctx.lineWidth = 2;
+        for (let i = -1; i <= 1; i++) {
+            ctx.beginPath();
+            ctx.moveTo(this.x + 14, this.y + this.h / 2 + i * 6);
+            ctx.lineTo(this.x + this.w - 12, this.y + this.h / 2 + i * 4);
+            ctx.stroke();
+        }
+    }
+}
+
+class RocketLauncher extends WeaponTurret {
+    constructor(x, y) {
+        super(x, y, 80, 54, { ammo: 1, cooldown: 0.4, reload: 2, label: 'ROCKET' });
+    }
+    fireProjectiles() {
+        const ang = this.findTargetAngle();
+        const rad = ang * Math.PI / 180;
+        const cx = this.x + this.w / 2 + Math.cos(rad) * 30;
+        const cy = this.y + this.h / 2 + Math.sin(rad) * 30;
+        arrows.push(new Projectile(cx, cy, ang, 280, {
+            damage: 0,
+            lifetime: 20,
+            kind: 'rocket',
+            home: true,
+            maxTurn: 40,
+            aoe: { radius: 150, damage: 60 }
+        }));
+        return true;
+    }
+    drawWeaponArt(ctx) {
+        ctx.fillStyle = '#57534e';
+        ctx.fillRect(this.x + 12, this.y + this.h / 2 - 7, this.w - 24, 14);
+        ctx.fillStyle = '#f97316';
+        ctx.fillRect(this.x + this.w - 22, this.y + this.h / 2 - 5, 10, 10);
     }
 }
 
@@ -2560,11 +2761,12 @@ class Enemy {
         this.vy = 0;
     }
 
-    takeHit(arrow) {
-        this.hp -= 15;
-        // knockback from arrow velocity
-        const rad = arrow.angle * Math.PI / 180;
-        const kb = Math.min(120, Math.max(30, arrow.speed * 0.15));
+    takeHit(proj) {
+        const dmg = (proj && proj.damage != null) ? proj.damage : 15;
+        this.hp -= dmg;
+        const rad = ((proj && proj.angle) || 0) * Math.PI / 180;
+        const spd = (proj && proj.speed) || 200;
+        const kb = Math.min(120, Math.max(30, spd * 0.15));
         this.vx += Math.cos(rad) * kb;
         this.vy += Math.sin(rad) * kb;
         if (this.hp <= 0) this.dead = true;
@@ -2787,16 +2989,19 @@ function getCore() {
     return null;
 }
 
-const PICK_POOL = [
+const LOGIC_PICK_POOL = [
     { id: 'AND', label: 'AND', desc: 'Logic gate', spawn: (x, y) => new AND(x, y) },
     { id: 'OR', label: 'OR', desc: 'Logic gate', spawn: (x, y) => new OR(x, y) },
     { id: 'XOR', label: 'XOR', desc: 'Logic gate', spawn: (x, y) => new XOR(x, y) },
     { id: 'NOT', label: 'NOT', desc: 'Inverter', spawn: (x, y) => new NOT(x, y) },
     { id: 'NAND', label: 'NAND', desc: 'Logic gate', spawn: (x, y) => new NAND(x, y) },
+    { id: 'NOR', label: 'NOR', desc: 'Logic gate', spawn: (x, y) => new NOR(x, y) },
+    { id: 'XNOR', label: 'XNOR', desc: 'Logic gate', spawn: (x, y) => new XNOR(x, y) },
     { id: 'Battery', label: 'Battery', desc: 'Always ON', spawn: (x, y) => new Battery(x, y) },
     { id: 'Lever', label: 'Lever', desc: 'Toggle source', spawn: (x, y) => new Lever(x, y) },
+    { id: 'Button', label: 'Button', desc: 'Hold to pulse', spawn: (x, y) => new Button(x, y) },
     { id: 'Clock', label: 'Clock', desc: 'Square wave', spawn: (x, y) => new Clock(x, y) },
-    { id: 'Crossbow', label: 'Crossbow', desc: 'Shoots arrows', spawn: (x, y) => new Crossbow(x, y) },
+    { id: 'Lamp', label: 'Lamp', desc: 'Light indicator', spawn: (x, y) => new Lamp(x, y) },
     { id: 'Crate', label: 'Crate', desc: 'Blocker (40 HP)', spawn: (x, y) => new Crate(x, y) },
     { id: 'Door', label: 'Door', desc: 'Openable wall', spawn: (x, y) => new Door(x, y) },
     { id: 'Plate', label: 'Pressure Plate', desc: 'Detect objects', spawn: (x, y) => new PressurePlate(x, y) },
@@ -2805,6 +3010,7 @@ const PICK_POOL = [
     { id: 'StickyPiston', label: 'Sticky Piston', desc: 'Push & pull', spawn: (x, y) => new StickyPiston(x, y) },
     { id: 'Glue', label: 'Glue', desc: 'Stick objects', spawn: (x, y) => new Glue(x + 22, y + 22, 22) },
     { id: 'DFF', label: 'D Flip-Flop', desc: 'Memory', spawn: (x, y) => new DFlipFlop(x, y) },
+    { id: 'TFF', label: 'T Flip-Flop', desc: 'Toggle memory', spawn: (x, y) => new TFlipFlop(x, y) },
     { id: 'Wire', label: 'Wire ×3', desc: 'Three wires', spawn: (x, y) => {
         wires.push(new Wire(x, y, x + 80, y));
         wires.push(new Wire(x, y + 20, x + 80, y + 20));
@@ -2812,7 +3018,16 @@ const PICK_POOL = [
         return null;
     }},
     { id: 'Bit4', label: '4-bit Number', desc: '0–15 source', spawn: (x, y) => new BitNumber(x, y, 4, 0, { label: '4u' }) },
+    { id: 'Bit8', label: '8-bit Number', desc: '0–255 source', spawn: (x, y) => new BitNumber(x, y, 8, 0, { label: '8u' }) },
     { id: 'HalfAdder', label: 'Half Adder', desc: 'Sum + Carry', spawn: (x, y) => new HalfAdder(x, y) },
+    { id: 'FullAdder', label: 'Full Adder', desc: '3-input adder', spawn: (x, y) => new FullAdder(x, y) },
+];
+
+const WEAPON_PICK_POOL = [
+    { id: 'Crossbow', label: 'Crossbow', desc: '15 dmg · 5 ammo · 0.3s', spawn: (x, y) => new Crossbow(x, y) },
+    { id: 'Ballista', label: 'Ballista', desc: '40 dmg · 2 ammo · 0.5s', spawn: (x, y) => new Ballista(x, y) },
+    { id: 'Scatterbow', label: 'Scatterbow', desc: '3×10 dmg · 9 ammo', spawn: (x, y) => new Scatterbow(x, y) },
+    { id: 'Rocket', label: 'Rocket Launcher', desc: '60 AoE · homes · 1 ammo', spawn: (x, y) => new RocketLauncher(x, y) },
 ];
 
 function buildSandboxKit() {
@@ -2820,6 +3035,7 @@ function buildSandboxKit() {
     wires = [];
     arrows = [];
     enemies = [];
+    explosions = [];
     gameOver = false;
     gameWon = false;
     wave = 0;
@@ -2902,29 +3118,92 @@ function spawnWave(n) {
     }
 }
 
+function samplePool(pool, n) {
+    const copy = pool.slice();
+    const out = [];
+    while (out.length < n && copy.length) {
+        const i = Math.floor(Math.random() * copy.length);
+        out.push(copy.splice(i, 1)[0]);
+    }
+    return out;
+}
+
+function spawnPickItem(p) {
+    const spawned = p.spawn(60 + Math.random() * 220, 60 + Math.random() * 160);
+    if (spawned) objects.push(spawned);
+}
+
+/** Stage A: pick 2 of 4 logic/physics. Stage B: pick 1 of 3 weapons. */
 function openPickUI() {
     pausedForPick = true;
     wavePhase = 'pick';
+    openLogicPick();
+}
+
+function openLogicPick() {
     const overlay = document.getElementById('pick-overlay');
     const box = document.getElementById('pick-choices');
+    const sub = document.querySelector('.pick-sub');
+    const title = overlay.querySelector('h2');
+    if (title) title.textContent = 'Logic & gear — pick 2 of 4';
+    if (sub) sub.textContent = 'Select two components, then Confirm. (No weapons in this step.)';
     box.innerHTML = '';
-    // 3 random unique choices
-    const pool = PICK_POOL.slice();
-    const picks = [];
-    while (picks.length < 3 && pool.length) {
-        const i = Math.floor(Math.random() * pool.length);
-        picks.push(pool.splice(i, 1)[0]);
+    const picks = samplePool(LOGIC_PICK_POOL, 4);
+    const selected = new Set();
+    const confirm = document.createElement('button');
+    confirm.type = 'button';
+    confirm.className = 'pick-btn pick-confirm';
+    confirm.textContent = 'Confirm (0/2)';
+    confirm.disabled = true;
+
+    function refreshConfirm() {
+        confirm.textContent = 'Confirm (' + selected.size + '/2)';
+        confirm.disabled = selected.size !== 2;
+        for (const btn of box.querySelectorAll('.pick-btn[data-id]')) {
+            btn.classList.toggle('selected', selected.has(btn.dataset.id));
+        }
     }
+
+    for (const p of picks) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'pick-btn';
+        btn.dataset.id = p.id;
+        btn.innerHTML = p.label + '<span class="desc">' + p.desc + '</span>';
+        btn.addEventListener('click', () => {
+            if (selected.has(p.id)) selected.delete(p.id);
+            else if (selected.size < 2) selected.add(p.id);
+            refreshConfirm();
+        });
+        box.appendChild(btn);
+    }
+    confirm.addEventListener('click', () => {
+        for (const p of picks) {
+            if (selected.has(p.id)) spawnPickItem(p);
+        }
+        openWeaponPick();
+    });
+    box.appendChild(confirm);
+    overlay.hidden = false;
+    updateWaveUI();
+}
+
+function openWeaponPick() {
+    const overlay = document.getElementById('pick-overlay');
+    const box = document.getElementById('pick-choices');
+    const sub = document.querySelector('.pick-sub');
+    const title = overlay.querySelector('h2');
+    if (title) title.textContent = 'Weapon — pick 1 of 3';
+    if (sub) sub.textContent = 'Choose one weapon to add to the field.';
+    box.innerHTML = '';
+    const picks = samplePool(WEAPON_PICK_POOL, 3);
     for (const p of picks) {
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'pick-btn';
         btn.innerHTML = p.label + '<span class="desc">' + p.desc + '</span>';
         btn.addEventListener('click', () => {
-            const spawned = p.spawn(80 + Math.random() * 200, 80 + Math.random() * 120);
-            if (spawned) objects.push(spawned);
-            // always grant an extra crossbow
-            objects.push(new Crossbow(120 + Math.random() * 180, 180 + Math.random() * 80));
+            spawnPickItem(p);
             overlay.hidden = true;
             pausedForPick = false;
             wavePhase = 'intermission';
@@ -4006,9 +4285,7 @@ window.addEventListener('keydown', (e) => {
         if (hoveredLever) {
             hoveredLever.toggle();
         } else if (hoveredGlue) {
-            const i = objects.indexOf(hoveredGlue);
-            if (i >= 0) objects.splice(i, 1);
-            hoveredGlue = null;
+            hoveredGlue.active = !hoveredGlue.active;
         } else if (hoveredJoint && hoveredJoint.isConnected) {
             hoveredJoint.disconnect();
             hoveredJoint = null;
@@ -4109,6 +4386,12 @@ function loop(now) {
         arrows = arrows.filter(a => !a.dead);
         for (const e of enemies) e.tick(dt);
         enemies = enemies.filter(e => !e.dead);
+        for (const ex of explosions) {
+            ex.age += dt;
+            ex.r = ex.maxR * Math.min(1, ex.age / ex.life);
+            for (const p of ex.particles) p.life -= dt;
+        }
+        explosions = explosions.filter(ex => ex.age < ex.life);
 
         syncAllPorts();
         validateObjObjConnections();
@@ -4146,13 +4429,47 @@ function loop(now) {
     }
     for (const a of arrows) a.draw(ctx);
     for (const e of enemies) e.draw(ctx);
+    for (const ex of explosions) {
+        const alpha = 1 - ex.age / ex.life;
+        ctx.strokeStyle = 'rgba(251, 146, 60,' + (alpha * 0.9) + ')';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(ex.x, ex.y, ex.r, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(254, 215, 170,' + (alpha * 0.25) + ')';
+        ctx.beginPath();
+        ctx.arc(ex.x, ex.y, ex.r * 0.7, 0, Math.PI * 2);
+        ctx.fill();
+        // radial lines
+        for (let i = 0; i < 8; i++) {
+            const a = (i / 8) * Math.PI * 2 + ex.age * 2;
+            ctx.strokeStyle = 'rgba(255, 255, 255,' + (alpha * 0.5) + ')';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(ex.x + Math.cos(a) * ex.r * 0.2, ex.y + Math.sin(a) * ex.r * 0.2);
+            ctx.lineTo(ex.x + Math.cos(a) * ex.r, ex.y + Math.sin(a) * ex.r);
+            ctx.stroke();
+        }
+        for (const p of ex.particles) {
+            if (p.life <= 0) continue;
+            const t = 1 - p.life / 0.65;
+            const px = ex.x + Math.cos(p.ang) * p.spd * t;
+            const py = ex.y + Math.sin(p.ang) * p.spd * t;
+            ctx.globalAlpha = Math.max(0, p.life * 2);
+            ctx.fillStyle = '#fdba74';
+            ctx.beginPath();
+            ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+    }
     for (const p of allPorts()) p.draw(ctx);
 
     if (!drag && !onTitleScreen && !gameOver && !gameWon) {
         if (hoveredLever) {
             drawTooltip(ctx, hoveredLever.x + hoveredLever.w / 2, hoveredLever.y, 'E to toggle');
         } else if (hoveredGlue) {
-            drawTooltip(ctx, hoveredGlue.centerX, hoveredGlue.y, 'E to remove glue · drag rim to resize');
+            drawTooltip(ctx, hoveredGlue.centerX, hoveredGlue.y, 'E to detach/reattach · drag rim to resize');
         } else if (hoveredButton) {
             drawTooltip(ctx, hoveredButton.x + hoveredButton.w / 2, hoveredButton.y, 'Hold E to press');
         } else if (hoveredJoint) {
