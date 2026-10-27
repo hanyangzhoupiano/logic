@@ -453,6 +453,8 @@ class Obj {
         if (this.shootPort) ports.push(this.shootPort);
         if (this.reloadPort) ports.push(this.reloadPort);
         if (this.healPort) ports.push(this.healPort);
+        if (this.outputA) ports.push(this.outputA);
+        if (this.outputB) ports.push(this.outputB);
         if (this.outputPort) ports.push(this.outputPort);
         if (this.outputSum) ports.push(this.outputSum);
         if (this.outputCarry) ports.push(this.outputCarry);
@@ -1621,8 +1623,11 @@ class Crate extends Obj {
     evaluate() {}
 
     takeDamage(amount) {
+        if (amount <= 0) return;
         this.hp = Math.max(0, this.hp - amount);
         this.lastDamageAt = performance.now() / 1000;
+        spawnFloatText(this.x + this.w / 2, this.y, '-' + Math.round(amount), '#60a5fa');
+        spawnHitSpark(this.x + this.w / 2, this.y + this.h / 2, '#93c5fd');
         if (this.hp <= 0) {
             const i = objects.indexOf(this);
             if (i >= 0) objects.splice(i, 1);
@@ -1668,7 +1673,11 @@ class PressurePlate extends Obj {
         super(x, y, 72, 18);
         this.inputPort = null;
         this.noCollision = true;
-        this.pressed = false;
+        this.pressed = false;   // physical contact this frame
+        this.active = false;    // output signal
+        this.pressAge = 0;      // how long current press has been held
+        this.remain = 0;        // extra time to stay ON after short press
+        this.minMs = 0.3;       // minimum ON duration (same idea as button)
         this.updatePorts();
     }
 
@@ -1685,13 +1694,12 @@ class PressurePlate extends Obj {
         }
     }
 
-    physicsTick() {
+    physicsTick(dt) {
         this.pressed = false;
         for (const o of objects) {
             if (o === this) continue;
             if (o.noCollision) continue;
             if (o instanceof Glue) continue;
-            if (o instanceof Arrow) continue;
             if (rectsOverlap(this.x, this.y, this.w, this.h, o.x, o.y, o.w, o.h)) {
                 this.pressed = true;
                 break;
@@ -1705,10 +1713,44 @@ class PressurePlate extends Obj {
                 }
             }
         }
+        if (!this.pressed) {
+            for (const e of enemies) {
+                if (e.dead) continue;
+                if (rectsOverlap(this.x, this.y, this.w, this.h, e.x, e.y, e.w, e.h)) {
+                    this.pressed = true;
+                    break;
+                }
+            }
+        }
+
+        // Mirror button: any contact turns ON immediately; signal lasts ≥300ms total
+        if (this.pressed) {
+            if (!this.active) this.pressAge = 0;
+            this.active = true;
+            this.remain = 0;
+            this.pressAge += dt;
+        } else if (this.active) {
+            if (this.remain > 0) {
+                this.remain -= dt;
+                if (this.remain <= 0) {
+                    this.active = false;
+                    this.remain = 0;
+                }
+            } else if (this.pressAge < this.minMs) {
+                // just released after a short press — stretch to min duration
+                this.remain = this.minMs - this.pressAge;
+                this.pressAge = this.minMs;
+            } else {
+                this.active = false;
+            }
+        } else {
+            this.pressAge = 0;
+            this.remain = 0;
+        }
     }
 
     evaluate() {
-        this.outputPort.powered = this.pressed;
+        this.outputPort.powered = this.active;
     }
 
     draw(ctx) {
@@ -1945,8 +1987,11 @@ class Door extends Obj {
 
     takeDamage(amount) {
         if (this.open) return;
+        if (amount <= 0) return;
         this.hp = Math.max(0, this.hp - amount);
         this.lastDamageAt = performance.now() / 1000;
+        spawnFloatText(this.x + this.w / 2, this.y + this.h / 2, '-' + Math.round(amount), '#60a5fa');
+        spawnHitSpark(this.x + this.w / 2, this.y + this.h / 2, '#93c5fd');
         if (this.hp <= 0) {
             const i = objects.indexOf(this);
             if (i >= 0) objects.splice(i, 1);
@@ -2186,11 +2231,196 @@ class Glue extends Obj {
 
 
 
+
+// ---------- Signal utilities ----------
+
+class SignalSplit extends Obj {
+    constructor(x, y) {
+        super(x, y, 70, 56);
+        this.outputPort = null;
+        this.outputA = new Port(0, 0, 'output', this);
+        this.outputB = new Port(0, 0, 'output', this);
+        this.updatePorts();
+    }
+
+    updatePorts() {
+        if (this.inputPort) {
+            this.inputPort.x = this.x + this.w / 2;
+            this.inputPort.y = this.y;
+            if (this.inputPort.connectedTo && this.inputPort.connectedTo.owner.isWire) {
+                this.inputPort.connectedTo.x = this.inputPort.x;
+                this.inputPort.connectedTo.y = this.inputPort.y;
+            }
+        }
+        if (this.outputA) {
+            this.outputA.x = this.x + this.w * 0.3;
+            this.outputA.y = this.y + this.h;
+            if (this.outputA.connectedTo && this.outputA.connectedTo.owner.isWire) {
+                this.outputA.connectedTo.x = this.outputA.x;
+                this.outputA.connectedTo.y = this.outputA.y;
+            }
+        }
+        if (this.outputB) {
+            this.outputB.x = this.x + this.w * 0.7;
+            this.outputB.y = this.y + this.h;
+            if (this.outputB.connectedTo && this.outputB.connectedTo.owner.isWire) {
+                this.outputB.connectedTo.x = this.outputB.x;
+                this.outputB.connectedTo.y = this.outputB.y;
+            }
+        }
+    }
+
+    evaluate() {
+        const v = this.inputSignal(this.inputPort);
+        this.outputA.powered = v;
+        this.outputB.powered = v;
+    }
+
+    draw(ctx) {
+        drawBody(ctx, this.x, this.y, this.w, this.h);
+        drawLabel(ctx, this.x, this.y, this.w, this.h * 0.55, 'SPLIT');
+        ctx.fillStyle = '#888';
+        ctx.font = '8px system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Y', this.x + this.w * 0.3, this.y + this.h - 6);
+        ctx.fillText('Y', this.x + this.w * 0.7, this.y + this.h - 6);
+        ctx.textAlign = 'left';
+    }
+}
+
+/** Extends ON for delayMs after input falls. Double-click to edit 100–1000 ms. */
+class SignalSustain extends Obj {
+    constructor(x, y) {
+        super(x, y, 78, 56);
+        this.delayMs = 300;
+        this.hold = 0;
+        this._out = false;
+        this.updatePorts();
+    }
+
+    setDelayMs(v) {
+        v = Math.round(Number(v));
+        if (!Number.isFinite(v)) v = 300;
+        this.delayMs = Math.max(100, Math.min(1000, v));
+    }
+
+    physicsTick(dt) {
+        const on = this.inputSignal(this.inputPort);
+        if (on) {
+            this._out = true;
+            this.hold = this.delayMs / 1000;
+        } else if (this.hold > 0) {
+            this.hold -= dt;
+            this._out = this.hold > 0;
+        } else {
+            this._out = false;
+        }
+    }
+
+    evaluate() {
+        this.outputPort.powered = this._out;
+    }
+
+    draw(ctx) {
+        drawBody(ctx, this.x, this.y, this.w, this.h);
+        drawLabel(ctx, this.x, this.y, this.w, this.h * 0.45, 'SUSTAIN');
+        ctx.fillStyle = '#9ca3af';
+        ctx.font = '9px system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(this.delayMs + 'ms', this.x + this.w / 2, this.y + this.h * 0.72);
+        ctx.textAlign = 'left';
+    }
+}
+
+/** Delays signal by delayMs. Double-click to edit 100–1000 ms. */
+class SignalDelay extends Obj {
+    constructor(x, y) {
+        super(x, y, 78, 56);
+        this.delayMs = 300;
+        this.now = 0;
+        this.hist = [];
+        this._out = false;
+        this.updatePorts();
+    }
+
+    setDelayMs(v) {
+        v = Math.round(Number(v));
+        if (!Number.isFinite(v)) v = 300;
+        this.delayMs = Math.max(100, Math.min(1000, v));
+    }
+
+    physicsTick(dt) {
+        this.now += dt;
+        const v = this.inputSignal(this.inputPort);
+        this.hist.push({ t: this.now, v });
+        const target = this.now - this.delayMs / 1000;
+        let out = false;
+        for (const s of this.hist) {
+            if (s.t <= target) out = s.v;
+        }
+        this._out = out;
+        this.hist = this.hist.filter(s => s.t >= target - 0.05);
+    }
+
+    evaluate() {
+        this.outputPort.powered = this._out;
+    }
+
+    draw(ctx) {
+        drawBody(ctx, this.x, this.y, this.w, this.h);
+        drawLabel(ctx, this.x, this.y, this.w, this.h * 0.45, 'DELAY');
+        ctx.fillStyle = '#9ca3af';
+        ctx.font = '9px system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(this.delayMs + 'ms', this.x + this.w / 2, this.y + this.h * 0.72);
+        ctx.textAlign = 'left';
+    }
+}
+
 // ---------- Combat entities ----------
 
 const PROJ_MAX_SPEED = 520;
 const PROJ_MIN_SPEED = 80;
-let explosions = []; // visual + optional lingering damage already applied on create
+let explosions = [];
+let floatingTexts = []; // {x,y,vy,text,color,age,life}
+let hitSparks = [];     // {x,y,age,life,color}
+let muzzleFlashes = []; // {x,y,angle,age,life}
+
+function spawnFloatText(x, y, text, color) {
+    if (floatingTexts.length > 48) floatingTexts.shift();
+    floatingTexts.push({
+        x: x + (Math.random() - 0.5) * 10,
+        y: y,
+        vy: -36 - Math.random() * 18,
+        text: String(text),
+        color: color,
+        age: 0,
+        life: 0.85
+    });
+}
+
+function spawnHitSpark(x, y, color) {
+    if (hitSparks.length > 40) hitSparks.shift();
+    hitSparks.push({ x, y, age: 0, life: 0.28, color: color || '#fca5a5' });
+}
+
+function spawnMuzzle(x, y, angle) {
+    if (muzzleFlashes.length > 20) muzzleFlashes.shift();
+    muzzleFlashes.push({ x, y, angle, age: 0, life: 0.12 });
+}
+
+function drawOutlinedText(ctx, text, x, y, fill) {
+    ctx.font = 'bold 14px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#000';
+    ctx.strokeText(text, x, y);
+    ctx.fillStyle = fill;
+    ctx.fillText(text, x, y);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+}
 
 function angleDiff(a, b) {
     return ((b - a + 540) % 360) - 180;
@@ -2283,7 +2513,15 @@ class Projectile {
         const ny = this.y + Math.sin(rad) * this.speed * dt;
 
         if (this.blockedBySolid(nx, ny)) {
-            // linger in place; keep velocity/heading for when path clears
+            if (this.kind === 'rocket' && this.aoe) {
+                // direct half-damage to the solid we struck, then detonate
+                this.damageFriendlyAt(nx, ny, (this.damage || 0) * 0.5);
+                this.x = nx;
+                this.y = ny;
+                this.explode();
+                return;
+            }
+            // other projectiles linger until despawn timer
             this.blocked = true;
         } else {
             this.blocked = false;
@@ -2291,11 +2529,13 @@ class Projectile {
             this.y = ny;
         }
 
-        // Hit enemies (rockets explode)
+        // Hit enemies
         for (const e of enemies) {
             if (e.dead) continue;
             if (!rectsOverlap(this.x - 4, this.y - 4, 8, 8, e.x, e.y, e.w, e.h)) continue;
             if (this.aoe) {
+                // impact damage then AoE
+                e.takeHit(this);
                 this.explode();
             } else {
                 e.takeHit(this);
@@ -2309,9 +2549,26 @@ class Projectile {
         }
     }
 
+    damageFriendlyAt(nx, ny, amount) {
+        if (amount <= 0) return;
+        for (const o of objects) {
+            if (o instanceof Door && !o.open) {
+                if (rectsOverlap(nx - 2, ny - 2, 4, 4, o.x, o.y, o.w, o.h)) {
+                    if (typeof o.takeDamage === 'function') o.takeDamage(amount);
+                }
+            }
+            if (o instanceof Crate) {
+                if (rectsOverlap(nx - 2, ny - 2, 4, 4, o.x, o.y, o.w, o.h)) {
+                    if (typeof o.takeDamage === 'function') o.takeDamage(amount);
+                }
+            }
+        }
+    }
+
     explode() {
         if (this.dead) return;
         this.dead = true;
+        if (!this.aoe) return;
         const R = this.aoe.radius;
         const dmg = this.aoe.damage;
         for (const e of enemies) {
@@ -2321,12 +2578,28 @@ class Projectile {
                 e.takeHit({ angle: this.angle, speed: this.speed, damage: dmg });
             }
         }
+        // Friendly fire: half AoE to crates / closed doors
+        const friendly = dmg * 0.5;
+        for (const o of objects) {
+            if (o instanceof Crate) {
+                const cx = o.x + o.w / 2, cy = o.y + o.h / 2;
+                if (dist(this.x, this.y, cx, cy) <= R && typeof o.takeDamage === 'function') {
+                    o.takeDamage(friendly);
+                }
+            }
+            if (o instanceof Door && !o.open) {
+                const cx = o.x + o.w / 2, cy = o.y + o.h / 2;
+                if (dist(this.x, this.y, cx, cy) <= R && typeof o.takeDamage === 'function') {
+                    o.takeDamage(friendly);
+                }
+            }
+        }
         explosions.push({
             x: this.x, y: this.y, r: 8, maxR: R, age: 0, life: 0.55,
-            particles: Array.from({ length: 18 }, () => ({
+            particles: Array.from({ length: 10 }, () => ({
                 ang: Math.random() * Math.PI * 2,
-                spd: 40 + Math.random() * 160,
-                life: 0.3 + Math.random() * 0.35
+                spd: 40 + Math.random() * 140,
+                life: 0.25 + Math.random() * 0.3
             }))
         });
     }
@@ -2482,38 +2755,47 @@ class WeaponTurret extends Obj {
     }
 
     drawWeaponArt(ctx) {
-        // override
+        // override — drawn in local space with origin at center, facing +X
     }
 
     draw(ctx) {
-        drawBody(ctx, this.x, this.y, this.w, this.h);
+        const cx = this.x + this.w / 2;
+        const cy = this.y + this.h / 2;
+        // base plate
+        ctx.fillStyle = '#1f2937';
+        ctx.fillRect(this.x + 4, this.y + this.h - 14, this.w - 8, 12);
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(this.x + 4.5, this.y + this.h - 13.5, this.w - 9, 11);
+
+        // art faces +X in local center space; parent loop applies this.angle
+        ctx.save();
+        ctx.translate(cx, cy);
         this.drawWeaponArt(ctx);
+        ctx.restore();
+
         ctx.fillStyle = '#9ca3af';
         ctx.font = '8px system-ui, sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText('FIRE', this.x + this.w * 0.28, this.y + 11);
-        ctx.fillText('RLOD', this.x + this.w * 0.72, this.y + 11);
-        ctx.fillStyle = '#eee';
+        ctx.fillText('FIRE', this.x + this.w * 0.28, this.y + 10);
+        ctx.fillText('RLOD', this.x + this.w * 0.72, this.y + 10);
+        ctx.fillStyle = '#f8fafc';
         ctx.font = 'bold 11px system-ui, sans-serif';
-        ctx.fillText(this.reloading ? '…' : (this.ammo + '/' + this.maxAmmo), this.x + this.w / 2, this.y + this.h - 10);
-        ctx.fillStyle = '#aaa';
-        ctx.font = '9px system-ui, sans-serif';
-        ctx.fillText(this.weaponLabel, this.x + this.w / 2, this.y + this.h * 0.45);
+        ctx.fillText(this.reloading ? '…' : (this.ammo + '/' + this.maxAmmo), cx, this.y + this.h - 5);
         ctx.textAlign = 'left';
         if (this.reloading) {
             const t = this.reloadTimer / this.reloadDuration;
-            ctx.fillStyle = '#222';
-            ctx.fillRect(this.x + 8, this.y + this.h - 6, this.w - 16, 4);
+            ctx.fillStyle = '#111';
+            ctx.fillRect(this.x + 10, this.y + this.h - 3, this.w - 20, 3);
             ctx.fillStyle = '#eab308';
-            ctx.fillRect(this.x + 8, this.y + this.h - 6, (this.w - 16) * t, 4);
+            ctx.fillRect(this.x + 10, this.y + this.h - 3, (this.w - 20) * t, 3);
         }
-        const ang = this.angle * Math.PI / 180;
-        const cx = this.x + this.w / 2, cy = this.y + this.h / 2;
-        ctx.strokeStyle = '#3b82f6';
-        ctx.beginPath();
-        ctx.moveTo(cx, cy);
-        ctx.lineTo(cx + Math.cos(ang) * 22, cy + Math.sin(ang) * 22);
-        ctx.stroke();
+    }
+
+    /** Call when firing for muzzle VFX. */
+    flashMuzzle(ang) {
+        const rad = ang * Math.PI / 180;
+        spawnMuzzle(this.x + this.w / 2 + Math.cos(rad) * 30, this.y + this.h / 2 + Math.sin(rad) * 30, ang);
     }
 }
 
@@ -2527,18 +2809,44 @@ class Crossbow extends WeaponTurret {
         const cx = this.x + this.w / 2 + Math.cos(rad) * 28;
         const cy = this.y + this.h / 2 + Math.sin(rad) * 28;
         arrows.push(new Arrow(cx, cy, ang, 400));
+        this.flashMuzzle(ang);
         return true;
     }
     drawWeaponArt(ctx) {
-        ctx.strokeStyle = '#a3a3a3';
-        ctx.lineWidth = 2;
+        // local space, facing +X, origin center
+        // stock
+        ctx.fillStyle = '#7c2d12';
+        ctx.fillRect(-28, -5, 18, 10);
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(-28, -5, 18, 10);
+        // body / prod
+        ctx.fillStyle = '#a8a29e';
+        ctx.fillRect(-12, -3, 26, 6);
+        ctx.strokeRect(-12, -3, 26, 6);
+        // bow limbs
+        ctx.strokeStyle = '#d6d3d1';
+        ctx.lineWidth = 2.5;
         ctx.beginPath();
-        ctx.arc(this.x + this.w * 0.55, this.y + this.h / 2, 16, -1.1, 1.1);
+        ctx.moveTo(6, -16);
+        ctx.quadraticCurveTo(18, -10, 14, 0);
+        ctx.quadraticCurveTo(18, 10, 6, 16);
         ctx.stroke();
+        // string
+        ctx.strokeStyle = '#e7e5e4';
+        ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(this.x + 12, this.y + this.h / 2);
-        ctx.lineTo(this.x + this.w - 10, this.y + this.h / 2);
+        ctx.moveTo(6, -16);
+        ctx.lineTo(-2, 0);
+        ctx.lineTo(6, 16);
         ctx.stroke();
+        // bolt resting
+        if (!this.reloading && this.ammo > 0) {
+            ctx.fillStyle = '#e5e5e5';
+            ctx.fillRect(-4, -1.5, 22, 3);
+            ctx.fillStyle = '#b91c1c';
+            ctx.fillRect(-6, -2.5, 3, 5);
+        }
     }
 }
 
@@ -2552,13 +2860,36 @@ class Ballista extends WeaponTurret {
         const cx = this.x + this.w / 2 + Math.cos(rad) * 32;
         const cy = this.y + this.h / 2 + Math.sin(rad) * 32;
         arrows.push(new Projectile(cx, cy, ang, 360, { damage: 40, lifetime: 10, kind: 'bolt' }));
+        this.flashMuzzle(ang);
         return true;
     }
     drawWeaponArt(ctx) {
+        // heavy frame
+        ctx.fillStyle = '#44403c';
+        ctx.fillRect(-30, -10, 20, 20);
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(-30, -10, 20, 20);
+        // rails
         ctx.fillStyle = '#78716c';
-        ctx.fillRect(this.x + 10, this.y + this.h / 2 - 4, this.w - 20, 8);
-        ctx.strokeStyle = '#a8a29e';
-        ctx.strokeRect(this.x + 10, this.y + this.h / 2 - 4, this.w - 20, 8);
+        ctx.fillRect(-12, -5, 34, 10);
+        ctx.strokeRect(-12, -5, 34, 10);
+        // winch wheels
+        ctx.fillStyle = '#a8a29e';
+        ctx.beginPath(); ctx.arc(-22, -12, 5, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(-22, 12, 5, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#000';
+        ctx.beginPath(); ctx.arc(-22, -12, 5, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.arc(-22, 12, 5, 0, Math.PI * 2); ctx.stroke();
+        // large bolt
+        if (!this.reloading && this.ammo > 0) {
+            ctx.fillStyle = '#d6d3d1';
+            ctx.fillRect(-6, -2.5, 28, 5);
+            ctx.fillStyle = '#292524';
+            ctx.beginPath();
+            ctx.moveTo(22, 0); ctx.lineTo(30, -4); ctx.lineTo(30, 4); ctx.closePath();
+            ctx.fill();
+        }
     }
 }
 
@@ -2581,29 +2912,45 @@ class Scatterbow extends WeaponTurret {
                     { damage: 10, lifetime: 10, kind: 'pellet' }
                 ));
             }
+            this.flashMuzzle(base);
             return true;
         }
-        // pad to 3 by repeating closest
         while (targets.length < 3) targets.push(targets[0]);
+        let lastAng = this.facingAngle();
         for (let i = 0; i < 3; i++) {
             const e = targets[i];
             const ang = Math.atan2(e.y + e.h / 2 - cy0, e.x + e.w / 2 - cx0) * 180 / Math.PI;
+            lastAng = ang;
             const rad = ang * Math.PI / 180;
             arrows.push(new Projectile(
                 cx0 + Math.cos(rad) * 26, cy0 + Math.sin(rad) * 26, ang, 420,
                 { damage: 10, lifetime: 10, kind: 'pellet' }
             ));
         }
+        this.flashMuzzle(lastAng);
         return true;
     }
     drawWeaponArt(ctx) {
-        ctx.strokeStyle = '#d6d3d1';
-        ctx.lineWidth = 2;
+        // triple prod
+        ctx.fillStyle = '#57534e';
+        ctx.fillRect(-24, -8, 16, 16);
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(-24, -8, 16, 16);
         for (let i = -1; i <= 1; i++) {
+            ctx.strokeStyle = '#d6d3d1';
+            ctx.lineWidth = 2;
             ctx.beginPath();
-            ctx.moveTo(this.x + 14, this.y + this.h / 2 + i * 6);
-            ctx.lineTo(this.x + this.w - 12, this.y + this.h / 2 + i * 4);
+            ctx.moveTo(-6, i * 7);
+            ctx.quadraticCurveTo(12, i * 12, 18, i * 6);
             ctx.stroke();
+            // pellet tips
+            if (!this.reloading && this.ammo > 0) {
+                ctx.fillStyle = '#e5e5e5';
+                ctx.beginPath();
+                ctx.arc(14, i * 6, 2.5, 0, Math.PI * 2);
+                ctx.fill();
+            }
         }
     }
 }
@@ -2617,21 +2964,47 @@ class RocketLauncher extends WeaponTurret {
         const rad = ang * Math.PI / 180;
         const cx = this.x + this.w / 2 + Math.cos(rad) * 30;
         const cy = this.y + this.h / 2 + Math.sin(rad) * 30;
-        arrows.push(new Projectile(cx, cy, ang, 280, {
-            damage: 0,
+        arrows.push(new Projectile(cx, cy, ang, 150, {
+            damage: 10,
             lifetime: 20,
             kind: 'rocket',
             home: true,
             maxTurn: 40,
             aoe: { radius: 150, damage: 60 }
         }));
+        this.flashMuzzle(ang);
         return true;
     }
     drawWeaponArt(ctx) {
-        ctx.fillStyle = '#57534e';
-        ctx.fillRect(this.x + 12, this.y + this.h / 2 - 7, this.w - 24, 14);
-        ctx.fillStyle = '#f97316';
-        ctx.fillRect(this.x + this.w - 22, this.y + this.h / 2 - 5, 10, 10);
+        // tube
+        ctx.fillStyle = '#292524';
+        ctx.fillRect(-28, -9, 48, 18);
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(-28, -9, 48, 18);
+        // bands
+        ctx.fillStyle = '#78716c';
+        ctx.fillRect(-20, -9, 4, 18);
+        ctx.fillRect(4, -9, 4, 18);
+        // muzzle
+        ctx.fillStyle = '#44403c';
+        ctx.fillRect(18, -11, 10, 22);
+        ctx.strokeRect(18, -11, 10, 22);
+        // loaded rocket nose
+        if (!this.reloading && this.ammo > 0) {
+            ctx.fillStyle = '#f97316';
+            ctx.beginPath();
+            ctx.moveTo(8, 0); ctx.lineTo(20, -6); ctx.lineTo(20, 6); ctx.closePath();
+            ctx.fill();
+            ctx.fillStyle = '#fdba74';
+            ctx.fillRect(-8, -4, 16, 8);
+        }
+        // rear fins
+        ctx.fillStyle = '#a8a29e';
+        ctx.beginPath();
+        ctx.moveTo(-28, -9); ctx.lineTo(-34, -14); ctx.lineTo(-28, -4); ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(-28, 9); ctx.lineTo(-34, 14); ctx.lineTo(-28, 4); ctx.fill();
     }
 }
 
@@ -2663,7 +3036,10 @@ class Core extends Obj {
     }
 
     takeDamage(amount) {
+        if (amount <= 0) return;
         this.hp = Math.max(0, this.hp - amount);
+        spawnFloatText(this.x + this.w / 2, this.y, '-' + Math.round(amount), '#60a5fa');
+        spawnHitSpark(this.x + this.w / 2, this.y + this.h / 2, '#93c5fd');
         if (this.hp <= 0) {
             triggerGameOver();
         }
@@ -2672,9 +3048,13 @@ class Core extends Obj {
     tryHeal() {
         if (this.healCooldown > 0) return;
         if (this.hp >= this.maxHp) return;
+        const before = this.hp;
         this.hp = Math.min(this.maxHp, this.hp + this.healAmount);
+        const gained = this.hp - before;
         this.healCooldown = this.healCooldownMax;
-        // particles
+        if (gained > 0) {
+            spawnFloatText(this.x + this.w / 2, this.y, '+' + Math.round(gained), '#4ade80');
+        }
         for (let i = 0; i < 12; i++) {
             this.particles.push({
                 x: this.x + this.w / 2,
@@ -2763,7 +3143,11 @@ class Enemy {
 
     takeHit(proj) {
         const dmg = (proj && proj.damage != null) ? proj.damage : 15;
-        this.hp -= dmg;
+        if (dmg > 0) {
+            this.hp -= dmg;
+            spawnFloatText(this.x + this.w / 2, this.y, '-' + Math.round(dmg), '#f87171');
+            spawnHitSpark(this.x + this.w / 2, this.y + this.h / 2, '#fca5a5');
+        }
         const rad = ((proj && proj.angle) || 0) * Math.PI / 180;
         const spd = (proj && proj.speed) || 200;
         const kb = Math.min(120, Math.max(30, spd * 0.15));
@@ -2974,6 +3358,7 @@ function getMousePos(e) {
 
 let onTitleScreen = true;
 let editingNumber = null;
+let editingDelay = null;
 let arrows = [];
 let enemies = [];
 let gameOver = false;
@@ -3021,6 +3406,9 @@ const LOGIC_PICK_POOL = [
     { id: 'Bit8', label: '8-bit Number', desc: '0–255 source', spawn: (x, y) => new BitNumber(x, y, 8, 0, { label: '8u' }) },
     { id: 'HalfAdder', label: 'Half Adder', desc: 'Sum + Carry', spawn: (x, y) => new HalfAdder(x, y) },
     { id: 'FullAdder', label: 'Full Adder', desc: '3-input adder', spawn: (x, y) => new FullAdder(x, y) },
+    { id: 'Split', label: 'Signal Split', desc: '1 in → 2 out', spawn: (x, y) => new SignalSplit(x, y) },
+    { id: 'Sustain', label: 'Signal Sustain', desc: 'Hold ON after fall', spawn: (x, y) => new SignalSustain(x, y) },
+    { id: 'Delay', label: 'Signal Delay', desc: 'Delay signal', spawn: (x, y) => new SignalDelay(x, y) },
 ];
 
 const WEAPON_PICK_POOL = [
@@ -3036,6 +3424,9 @@ function buildSandboxKit() {
     arrows = [];
     enemies = [];
     explosions = [];
+    floatingTexts = [];
+    hitSparks = [];
+    muzzleFlashes = [];
     gameOver = false;
     gameWon = false;
     wave = 0;
@@ -3045,35 +3436,28 @@ function buildSandboxKit() {
     document.getElementById('pick-overlay').hidden = true;
     document.getElementById('end-overlay').hidden = true;
 
-    // Core in center-ish
+    // Core
     objects.push(new Core(360, 260));
 
-    // Sources & controls
+    // Required starter kit
     objects.push(new Battery(40, 40));
     objects.push(new Lever(140, 40));
-    objects.push(new Button(240, 40));
-    objects.push(new Clock(340, 40, 800));
-
-    // Gates
-    objects.push(new AND(40, 140));
-    objects.push(new OR(150, 140));
-    objects.push(new NOT(260, 140));
-
-    // Defense
-    objects.push(new Crossbow(40, 220));
-    objects.push(new Crossbow(130, 220));
-    objects.push(new Crossbow(220, 220));
+    objects.push(new Clock(240, 40, 800));
+    objects.push(new SignalSplit(40, 120));
+    objects.push(new SignalDelay(140, 120));
+    objects.push(new AND(40, 200));
+    objects.push(new OR(150, 200));
+    objects.push(new Crossbow(40, 280));
+    objects.push(new Crossbow(130, 280));
+    objects.push(new Ballista(220, 280));
+    objects.push(new PressurePlate(40, 360));
     objects.push(new Crate(500, 240));
     objects.push(new Crate(500, 300));
     objects.push(new Door(560, 200, 18, 140));
-    objects.push(new PressurePlate(40, 320));
 
-    // Numbers
-    objects.push(new BitNumber(480, 40, 4, 0, { label: '4u' }));
-
-    // Wires
-    for (let i = 0; i < 10; i++) {
-        wires.push(new Wire(40 + (i % 5) * 90, 400 + Math.floor(i / 5) * 40, 100 + (i % 5) * 90, 400 + Math.floor(i / 5) * 40));
+    // 8 wires
+    for (let i = 0; i < 8; i++) {
+        wires.push(new Wire(40 + (i % 4) * 100, 420 + Math.floor(i / 4) * 36, 110 + (i % 4) * 100, 420 + Math.floor(i / 4) * 36));
     }
     updateWaveUI();
 }
@@ -3207,7 +3591,7 @@ function openWeaponPick() {
             overlay.hidden = true;
             pausedForPick = false;
             wavePhase = 'intermission';
-            waveTimer = 5;
+            waveTimer = 20; // longer build time after upgrade picks
             updateWaveUI();
         });
         box.appendChild(btn);
@@ -3303,12 +3687,34 @@ function openNumberEdit(bn) {
     const input = document.getElementById('num-edit');
     if (!input) return;
     editingNumber = bn;
+    editingDelay = null;
     input.hidden = false;
     input.min = String(bn.minValue);
     input.max = String(bn.maxValue);
     input.step = '1';
     input.value = String(bn.value);
     positionNumberEdit();
+    input.focus();
+    input.select();
+}
+
+function openDelayEdit(comp) {
+    const input = document.getElementById('num-edit');
+    if (!input) return;
+    editingNumber = null;
+    editingDelay = comp;
+    input.hidden = false;
+    input.min = '100';
+    input.max = '1000';
+    input.step = '10';
+    input.value = String(comp.delayMs);
+    // position over component
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = rect.width / canvas.width;
+    const scaleY = rect.height / canvas.height;
+    input.style.left = (rect.left + (comp.x + 8) * scaleX) + 'px';
+    input.style.top = (rect.top + (comp.y + comp.h * 0.12) * scaleY) + 'px';
+    input.style.width = Math.max(56, (comp.w - 16) * scaleX) + 'px';
     input.focus();
     input.select();
 }
@@ -3329,7 +3735,9 @@ function closeNumberEdit(apply) {
     const input = document.getElementById('num-edit');
     if (!input) return;
     if (apply && editingNumber) editingNumber.setValue(input.value);
+    if (apply && editingDelay) editingDelay.setDelayMs(input.value);
     editingNumber = null;
+    editingDelay = null;
     input.hidden = true;
 }
 
@@ -4039,6 +4447,8 @@ canvas.addEventListener('dblclick', (e) => {
     const obj = findObjectAt(pos.x, pos.y);
     if (obj instanceof BitNumber) {
         openNumberEdit(obj);
+    } else if (obj instanceof SignalDelay || obj instanceof SignalSustain) {
+        openDelayEdit(obj);
     }
 });
 
@@ -4381,17 +4791,58 @@ function loop(now) {
             if (typeof o.physicsTick === 'function') o.physicsTick(dt);
         }
 
-        // Arrows & enemies
-        for (const a of arrows) a.tick(dt);
-        arrows = arrows.filter(a => !a.dead);
-        for (const e of enemies) e.tick(dt);
-        enemies = enemies.filter(e => !e.dead);
-        for (const ex of explosions) {
+        // Arrows & enemies (cap for performance)
+        if (arrows.length > 150) arrows.splice(0, arrows.length - 150);
+        for (let i = 0; i < arrows.length; i++) arrows[i].tick(dt);
+        let aw = 0;
+        for (let i = 0; i < arrows.length; i++) {
+            if (!arrows[i].dead) arrows[aw++] = arrows[i];
+        }
+        arrows.length = aw;
+
+        for (let i = 0; i < enemies.length; i++) enemies[i].tick(dt);
+        let ew = 0;
+        for (let i = 0; i < enemies.length; i++) {
+            if (!enemies[i].dead) enemies[ew++] = enemies[i];
+        }
+        enemies.length = ew;
+
+        for (let i = 0; i < explosions.length; i++) {
+            const ex = explosions[i];
             ex.age += dt;
             ex.r = ex.maxR * Math.min(1, ex.age / ex.life);
-            for (const p of ex.particles) p.life -= dt;
         }
-        explosions = explosions.filter(ex => ex.age < ex.life);
+        let xw = 0;
+        for (let i = 0; i < explosions.length; i++) {
+            if (explosions[i].age < explosions[i].life) explosions[xw++] = explosions[i];
+        }
+        explosions.length = xw;
+
+        for (let i = 0; i < floatingTexts.length; i++) {
+            const f = floatingTexts[i];
+            f.age += dt;
+            f.y += f.vy * dt;
+            f.vy += 20 * dt;
+        }
+        let fw = 0;
+        for (let i = 0; i < floatingTexts.length; i++) {
+            if (floatingTexts[i].age < floatingTexts[i].life) floatingTexts[fw++] = floatingTexts[i];
+        }
+        floatingTexts.length = fw;
+
+        for (let i = 0; i < hitSparks.length; i++) hitSparks[i].age += dt;
+        let sw = 0;
+        for (let i = 0; i < hitSparks.length; i++) {
+            if (hitSparks[i].age < hitSparks[i].life) hitSparks[sw++] = hitSparks[i];
+        }
+        hitSparks.length = sw;
+
+        for (let i = 0; i < muzzleFlashes.length; i++) muzzleFlashes[i].age += dt;
+        let mw = 0;
+        for (let i = 0; i < muzzleFlashes.length; i++) {
+            if (muzzleFlashes[i].age < muzzleFlashes[i].life) muzzleFlashes[mw++] = muzzleFlashes[i];
+        }
+        muzzleFlashes.length = mw;
 
         syncAllPorts();
         validateObjObjConnections();
@@ -4450,19 +4901,68 @@ function loop(now) {
             ctx.lineTo(ex.x + Math.cos(a) * ex.r, ex.y + Math.sin(a) * ex.r);
             ctx.stroke();
         }
-        for (const p of ex.particles) {
-            if (p.life <= 0) continue;
-            const t = 1 - p.life / 0.65;
-            const px = ex.x + Math.cos(p.ang) * p.spd * t;
-            const py = ex.y + Math.sin(p.ang) * p.spd * t;
-            ctx.globalAlpha = Math.max(0, p.life * 2);
+        // fewer particle updates — use age-based
+        const nSpark = 6;
+        for (let i = 0; i < nSpark; i++) {
+            const a = (i / nSpark) * Math.PI * 2 + ex.age * 3;
+            const rr = ex.r * (0.4 + 0.6 * (ex.age / ex.life));
+            ctx.globalAlpha = alpha * 0.8;
             ctx.fillStyle = '#fdba74';
             ctx.beginPath();
-            ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+            ctx.arc(ex.x + Math.cos(a) * rr, ex.y + Math.sin(a) * rr, 2, 0, Math.PI * 2);
             ctx.fill();
         }
         ctx.globalAlpha = 1;
     }
+
+    // Muzzle flashes
+    for (const m of muzzleFlashes) {
+        const t = 1 - m.age / m.life;
+        const rad = m.angle * Math.PI / 180;
+        ctx.save();
+        ctx.translate(m.x, m.y);
+        ctx.rotate(rad);
+        ctx.globalAlpha = t;
+        ctx.fillStyle = '#fef08a';
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(14 * t, -6);
+        ctx.lineTo(18 * t, 0);
+        ctx.lineTo(14 * t, 6);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#f97316';
+        ctx.beginPath();
+        ctx.arc(0, 0, 4 * t, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+
+    // Hit sparks
+    for (const s of hitSparks) {
+        const t = 1 - s.age / s.life;
+        ctx.strokeStyle = s.color;
+        ctx.globalAlpha = t;
+        ctx.lineWidth = 2;
+        for (let i = 0; i < 4; i++) {
+            const a = (i / 4) * Math.PI * 2 + s.age * 10;
+            ctx.beginPath();
+            ctx.moveTo(s.x, s.y);
+            ctx.lineTo(s.x + Math.cos(a) * 10 * t, s.y + Math.sin(a) * 10 * t);
+            ctx.stroke();
+        }
+    }
+    ctx.globalAlpha = 1;
+
+    // Floating damage / heal text (on top)
+    for (const f of floatingTexts) {
+        const t = 1 - f.age / f.life;
+        ctx.globalAlpha = Math.min(1, t * 1.4);
+        drawOutlinedText(ctx, f.text, f.x, f.y, f.color);
+    }
+    ctx.globalAlpha = 1;
+
     for (const p of allPorts()) p.draw(ctx);
 
     if (!drag && !onTitleScreen && !gameOver && !gameWon) {
