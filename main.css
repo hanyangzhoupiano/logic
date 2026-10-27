@@ -30,6 +30,49 @@ html, body {
   pointer-events: auto;
 }
 
+#title-screen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(18, 18, 26, 0.96);
+  pointer-events: auto;
+}
+
+#title-screen[hidden] {
+  display: none !important;
+}
+
+#title-screen h1 {
+  font-size: 36px;
+  color: #fff;
+  margin-bottom: 8px;
+}
+
+#title-screen .subtitle {
+  color: #888;
+  font-size: 15px;
+  margin-bottom: 28px;
+}
+
+#btn-play {
+  appearance: none;
+  border: none;
+  background: #3b82f6;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  padding: 12px 36px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+#btn-play:hover {
+  background: #2563eb;
+}
+
 #hud {
   position: absolute;
   top: 12px;
@@ -42,83 +85,47 @@ html, body {
   justify-content: space-between;
 }
 
-#level-info {
+#hud[hidden],
+#hint[hidden] {
+  display: none !important;
+}
+
+#hud-info {
   background: rgba(0, 0, 0, 0.82);
   color: #eee;
   padding: 10px 14px;
   border-radius: 8px;
-  max-width: min(520px, 92vw);
+  max-width: min(480px, 92vw);
   border: 1px solid #333;
 }
 
-#level-info h1 {
+#hud-info h1 {
   font-size: 15px;
   font-weight: 700;
   margin-bottom: 4px;
   color: #fff;
 }
 
-#level-info p {
-  font-size: 13px;
-  color: #bbb;
+#hud-info p {
+  font-size: 12px;
+  color: #aaa;
   line-height: 1.35;
 }
 
-#goal-box {
-  background: rgba(0, 0, 0, 0.82);
-  color: #eee;
-  padding: 10px 14px;
-  border-radius: 8px;
+.btn-menu {
   border: 1px solid #333;
-  min-width: 140px;
+  background: rgba(0, 0, 0, 0.82);
+  color: #ddd;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 14px;
+  border-radius: 8px;
+  cursor: pointer;
 }
 
-#goal-box .label {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: #888;
-  margin-bottom: 6px;
-}
-
-#goal-box .pattern {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-#goal-box .bit {
-  width: 28px;
-  height: 28px;
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  font-weight: 700;
-  border: 2px solid #444;
-}
-
-#goal-box .bit.on {
-  background: #1d4ed8;
-  border-color: #3b82f6;
+.btn-menu:hover {
+  background: rgba(40, 40, 55, 0.95);
   color: #fff;
-}
-
-#goal-box .bit.off {
-  background: #222;
-  border-color: #555;
-  color: #888;
-}
-
-#goal-box .bit.ok {
-  box-shadow: 0 0 0 2px #22c55e;
-}
-
-#goal-box .case {
-  margin-top: 8px;
-  font-size: 12px;
-  color: #999;
 }
 
 #hint {
@@ -133,169 +140,116 @@ html, body {
   border: 1px solid #333;
 }
 
-#win-overlay {
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.55);
-  display: none;
-  align-items: center;
-  justify-content: center;
+#num-edit {
+  position: fixed;
+  z-index: 20;
   pointer-events: auto;
-}
-
-#win-overlay.show {
-  display: flex;
-}
-
-#win-card {
-  background: #222230;
-  border: 1px solid #444;
-  border-radius: 12px;
-  padding: 28px 32px;
+  font-size: 14px;
+  font-weight: 700;
+  font-family: system-ui, sans-serif;
   text-align: center;
   color: #fff;
-  max-width: 360px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  background: #1e293b;
+  border: 2px solid #3b82f6;
+  border-radius: 6px;
+  padding: 4px 6px;
+  outline: none;
 }
 
-#win-card h2 {
-  font-size: 22px;
-  margin-bottom: 8px;
-}
-
-#win-card p {
-  color: #aaa;
-  font-size: 14px;
-  margin-bottom: 18px;
-}
-
-#win-card button {
-  appearance: none;
-  border: none;
-  background: #3b82f6;
-  color: #fff;
-  font-size: 14px;
-  font-weight: 600;
-  padding: 10px 22px;
-  border-radius: 8px;
-  cursor: pointer;
-}
-
-#win-card button:hover {
-  background: #2563eb;
-}
-
-#win-card button.secondary {
-  background: #333;
-  margin-left: 8px;
-}
-
-#win-card button.secondary:hover {
-  background: #444;
-}
-
-#hud {
-  display: flex;
-}
-
-#hud[hidden],
-#hint[hidden],
-#level-select[hidden] {
+#num-edit[hidden] {
   display: none !important;
 }
 
 .hud-right {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
+  gap: 10px;
+  align-items: flex-start;
 }
-
-.btn-levels {
+#core-hud {
+  background: rgba(0,0,0,0.82);
+  color: #eee;
+  padding: 8px 12px;
+  border-radius: 8px;
   border: 1px solid #333;
-  background: rgba(0, 0, 0, 0.82);
-  color: #ddd;
   font-size: 13px;
   font-weight: 600;
-  padding: 8px 14px;
-  border-radius: 8px;
-  cursor: pointer;
 }
-
-.btn-levels:hover {
-  background: rgba(40, 40, 55, 0.95);
-  color: #fff;
-}
-
-#level-select {
+#pick-overlay, #end-overlay {
   position: absolute;
   inset: 0;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  background: rgba(18, 18, 26, 0.96);
+  background: rgba(0,0,0,0.72);
   pointer-events: auto;
+  z-index: 30;
+}
+#pick-overlay[hidden], #end-overlay[hidden] {
+  display: none !important;
+}
+.pick-card, .end-card {
+  background: #16161f;
+  border: 1px solid #333;
+  border-radius: 12px;
   padding: 24px;
-  overflow: auto;
+  max-width: 640px;
+  text-align: center;
+  color: #eee;
 }
-
-#level-select h1 {
-  font-size: 32px;
-  color: #fff;
-  margin-bottom: 6px;
+.pick-card h2, .end-card h2 {
+  margin-bottom: 8px;
+  font-size: 22px;
 }
-
-#level-select .subtitle {
+.pick-sub {
   color: #888;
-  font-size: 14px;
-  margin-bottom: 28px;
+  font-size: 13px;
+  margin-bottom: 18px;
 }
-
-#level-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+#pick-choices {
+  display: flex;
   gap: 12px;
-  width: min(720px, 94vw);
+  flex-wrap: wrap;
+  justify-content: center;
 }
-
-.level-card {
+.pick-btn {
   appearance: none;
-  border: 1px solid #3a3a4a;
+  border: 1px solid #444;
   background: #222230;
   color: #eee;
   border-radius: 10px;
-  padding: 14px 16px;
-  text-align: left;
+  padding: 16px 18px;
+  min-width: 140px;
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
+  font-size: 14px;
+  font-weight: 600;
 }
-
-.level-card:hover {
+.pick-btn:hover {
   border-color: #3b82f6;
-  background: #2a2a3a;
+  background: #1e293b;
 }
-
-.level-card .num {
+.pick-btn .desc {
+  display: block;
+  margin-top: 6px;
   font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: #6b8cff;
-  margin-bottom: 4px;
-}
-
-.level-card .name {
-  font-size: 15px;
-  font-weight: 700;
-  margin-bottom: 4px;
-}
-
-.level-card .blurb {
-  font-size: 12px;
+  font-weight: 400;
   color: #999;
-  line-height: 1.35;
 }
-
-#win-card button.secondary {
-  margin-top: 8px;
+#end-msg {
+  color: #aaa;
+  margin: 12px 0 20px;
+}
+#btn-restart, #end-overlay button {
+  appearance: none;
+  border: none;
+  background: #3b82f6;
+  color: #fff;
+  font-weight: 700;
+  padding: 10px 22px;
+  border-radius: 8px;
+  cursor: pointer;
+  margin: 4px;
+  font-size: 14px;
+}
+#end-overlay button.secondary {
+  background: #333;
 }
